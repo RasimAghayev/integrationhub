@@ -1,0 +1,49 @@
+# Test profile — extends compose.dev.yaml with CI-friendly overrides.
+# Usage: docker compose -f compose.dev.yaml -f compose.test.yaml up -d
+
+services:
+  postgres:
+    environment:
+      POSTGRES_DB: integrationhub_test
+      POSTGRES_USER: integrationhub
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U integrationhub -d integrationhub_test"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  mongodb:
+    environment:
+      MONGO_INITDB_DATABASE: integrationhub_test
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.runCommand({ ping: 1 })"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  nats:
+    healthcheck:
+      test: ["CMD", "nats", "ping", "-s", "nats://localhost:4222"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  server:
+    environment:
+      INTEGRATIONHUB_DB_NAME: integrationhub_test
+      INTEGRATIONHUB_MONGO_HOST: mongodb
+      INTEGRATIONHUB_REDIS_ADDR: redis:6379
+      INTEGRATIONHUB_NATS_URL: nats://nats:4222
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 15

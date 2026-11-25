@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   postgres:
     image: postgres:16-alpine
@@ -77,8 +75,8 @@ services:
 
   server:
     build:
-      context: ./cmd/server
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: cmd/server/Dockerfile
     container_name: integrationhub-server
     environment:
       INTEGRATIONHUB_DB_HOST: postgres
