@@ -135,7 +135,7 @@ func checkRedis(ctx context.Context) bool {
 
 func checkNATS(ctx context.Context) bool {
 	url := env("INTEGRATIONHUB_NATS_URL", "nats://localhost:4222")
-	nc, err := nats.Connect(url, nats.ConnectTimeout(2*time.Second))
+	nc, err := nats.Connect(url, nats.Timeout(2*time.Second))
 	if err != nil {
 		return false
 	}
