@@ -70,14 +70,14 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build server image
-        uses: docker/build-push-action@v6.5.0
+        uses: docker/build-push-action@v6.19.2
         with:
           context: ./cmd/server
           push: ${{ github.ref == 'refs/heads/main' }}
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/server:${{ github.sha }}
 
       - name: Build web image
-        uses: docker/build-push-action@v6.5.0
+        uses: docker/build-push-action@v6.19.2
         with:
           context: ./web
           push: ${{ github.ref == 'refs/heads/main' }}
