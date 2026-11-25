@@ -32,7 +32,7 @@ require (
 	github.com/jackc/pgservicefile v1.0.0 // indirect
 	github.com/jackc/puddle/v2 v2.3.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.7 // indirect
-	github.com/klauspost/compress v1.17.9 // indirect
+	github.com/klauspost/compress v1.18.7 // indirect
 	github.com/minio/highwayhash v1.0.3 // indirect
 	github.com/pierrec/lz4/v4 v4.1.21 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
