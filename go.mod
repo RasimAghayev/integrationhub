@@ -13,7 +13,7 @@ require (
 	github.com/redis/go-redis/v9 v9.5.0
 	github.com/robfig/cron/v3 v3.1.0
 	github.com/stretchr/testify v1.9.0
-	go.mongodb.org/mongo-driver v1.15.0
+	go.mongodb.org/mongo-driver v1.17.7
 	golang.org/x/crypto v0.25.0
 	golang.org/x/oauth2 v0.19.0
 )
