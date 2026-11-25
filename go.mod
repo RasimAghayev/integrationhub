@@ -6,7 +6,7 @@ require (
 	github.com/casbin/casbin/v2 v2.8.0
 	github.com/go-chi/chi/v5 v5.1.0
 	github.com/go-playground/validator/v10 v10.15.0
-	github.com/golang-jwt/jwt/v5 v5.2.1
+	github.com/golang-jwt/jwt/v5 v5.2.2
 	github.com/gorilla/websocket v1.5.1
 	github.com/jackc/pgx/v5 v5.6.0
 	github.com/nats-io/nats.go v1.37.0
