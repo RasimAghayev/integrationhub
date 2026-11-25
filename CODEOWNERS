@@ -1,0 +1,21 @@
+# Code Owners
+
+# Default owners for all files
+*       @RasimAghayev
+
+# Backend (Go)
+/cmd/       @RasimAghayev
+/internal/  @RasimAghayev
+/pkg/       @RasimAghayev
+
+# Web UI (React)
+/web/       @RasimAghayev
+
+# Infrastructure
+/infrastructure/  @RasimAghayev
+
+# Documentation
+/docs/        @RasimAghayev
+
+# GitHub workflows
+/.github/     @RasimAghayev
