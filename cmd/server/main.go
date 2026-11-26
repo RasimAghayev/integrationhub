@@ -144,6 +144,7 @@ func main() {
 	sched := scheduler.New(schedStore, intStore, execSvc,
 		time.Duration(envInt("INTEGRATIONHUB_SCHED_TICK_MS", 60000))*time.Millisecond)
 	go sched.Start(workerCtx)
+	dataHandler := api.NewDataHandler(execSvc, intStore)
 	limiter := api.NewRateLimiter(
 		rate.Limit(envInt("INTEGRATIONHUB_RATE_PER_SEC", 100)),
 		envInt("INTEGRATIONHUB_RATE_BURST", 200),
@@ -159,6 +160,7 @@ func main() {
 		limiter:  limiter,
 		webhook:  webhookHandler,
 		schedule: schedHandler,
+		data:     dataHandler,
 		cors:     splitCSV(os.Getenv("INTEGRATIONHUB_CORS_ORIGINS")),
 	})
 
@@ -203,6 +205,7 @@ type routerDeps struct {
 	limiter  *api.RateLimiter
 	webhook  *api.WebhookHandler
 	schedule *api.ScheduleHandler
+	data     *api.DataHandler
 	cors     []string
 }
 
@@ -263,6 +266,12 @@ func newRouter(d routerDeps) http.Handler {
 				r.Get("/{id}", d.schedule.Get)
 				r.Put("/{id}", d.schedule.Update)
 				r.Delete("/{id}", d.schedule.Delete)
+			})
+		}
+		if d.data != nil {
+			r.Route("/api/v1/data", func(r chi.Router) {
+				r.Get("/export", d.data.Export)
+				r.Get("/schema/{id}", d.data.Schema)
 			})
 		}
 		if d.exec != nil {
