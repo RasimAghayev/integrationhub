@@ -78,7 +78,8 @@ func main() {
 	}
 
 	connHandler := api.NewConnectionHandler(store.NewConnectionStore(pool), cipher, oauthMgr)
-	router := newRouter(routerDeps{conn: connHandler})
+	intHandler := api.NewIntegrationHandler(store.NewIntegrationStore(pool))
+	router := newRouter(routerDeps{conn: connHandler, int: intHandler})
 
 	srv := &http.Server{
 		Addr:    addr,
@@ -108,6 +109,7 @@ func main() {
 
 type routerDeps struct {
 	conn *api.ConnectionHandler
+	int  *api.IntegrationHandler
 }
 
 func newRouter(d routerDeps) http.Handler {
@@ -131,6 +133,15 @@ func newRouter(d routerDeps) http.Handler {
 			r.Get("/{id}/oauth/authorize", d.conn.OAuthAuthorize)
 			r.Get("/{id}/oauth/callback", d.conn.OAuthCallback)
 			r.Post("/{id}/oauth/refresh", d.conn.OAuthRefresh)
+		})
+	}
+	if d.int != nil {
+		router.Route("/api/v1/integrations", func(r chi.Router) {
+			r.Get("/", d.int.List)
+			r.Post("/", d.int.Create)
+			r.Get("/{id}", d.int.Get)
+			r.Put("/{id}", d.int.Update)
+			r.Delete("/{id}", d.int.Delete)
 		})
 	}
 	return router

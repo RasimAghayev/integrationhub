@@ -60,3 +60,48 @@ func TestConnectionStoreCRUD(t *testing.T) {
 	_, err = s.Get(ctx, c.ID)
 	require.ErrorIs(t, err, domain.ErrNotFound)
 }
+
+func TestIntegrationStoreCRUD(t *testing.T) {
+	ctx := context.Background()
+	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: testcontainers.ContainerRequest{
+			Image:        "postgres:16-alpine",
+			Env:          map[string]string{"POSTGRES_USER": "integrationhub", "POSTGRES_PASSWORD": "test", "POSTGRES_DB": "integrationhub"},
+			ExposedPorts: []string{"5432/tcp"},
+			WaitingFor:   wait.ForLog("database system is ready to accept connections").WithOccurrence(2).WithStartupTimeout(60 * time.Second),
+		},
+		Started: true,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = container.Terminate(ctx) })
+
+	port, err := container.MappedPort(ctx, "5432/tcp")
+	require.NoError(t, err)
+	dsn := "host=localhost port=" + port.Port() + " user=integrationhub password=test dbname=integrationhub sslmode=disable"
+
+	pool, err := pgxpool.New(ctx, dsn)
+	require.NoError(t, err)
+	defer pool.Close()
+	require.NoError(t, Migrate(ctx, pool))
+
+	conn := &domain.Connection{Name: "GitHub", Type: "rest", AuthType: domain.AuthNone}
+	require.NoError(t, NewConnectionStore(pool).Create(ctx, conn))
+
+	is := NewIntegrationStore(pool)
+	i := &domain.Integration{
+		Name: "GitHub", Type: domain.IntegrationREST, ConnectionID: conn.ID,
+		Endpoints: []domain.Endpoint{{Name: "list", Method: "GET", Path: "/users"}},
+	}
+	require.NoError(t, i.Validate())
+	require.NoError(t, is.Create(ctx, i))
+	require.NotEmpty(t, i.ID)
+
+	got, err := is.Get(ctx, i.ID)
+	require.NoError(t, err)
+	require.Len(t, got.Endpoints, 1)
+	require.Equal(t, "/users", got.Endpoints[0].Path)
+
+	require.NoError(t, is.Delete(ctx, i.ID))
+	_, err = is.Get(ctx, i.ID)
+	require.ErrorIs(t, err, domain.ErrNotFound)
+}
