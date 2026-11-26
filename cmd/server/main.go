@@ -24,6 +24,7 @@ import (
 	"github.com/RasimAghayev/integrationhub/internal/rbac"
 	"github.com/RasimAghayev/integrationhub/internal/secret"
 	"github.com/RasimAghayev/integrationhub/internal/store"
+	"github.com/RasimAghayev/integrationhub/internal/telemetry"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5"
@@ -32,6 +33,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"golang.org/x/time/rate"
 )
 
@@ -54,6 +56,13 @@ func main() {
 
 	initCtx, initCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer initCancel()
+
+	shutdownTracing, err := telemetry.Init(initCtx, telemetry.FromEnv())
+	if err != nil {
+		slog.Error("tracing init failed", "error", err)
+		os.Exit(1)
+	}
+	defer telemetry.Shutdown(context.Background(), shutdownTracing)
 
 	pool, err := newPool(initCtx)
 	if err != nil {
@@ -142,7 +151,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           router,
+		Handler:           otelhttp.NewHandler(router, "http.server"),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,

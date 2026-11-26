@@ -14,8 +14,14 @@ import (
 	"net/http"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/time/rate"
 )
+
+var tracer = otel.Tracer("integrationhub.executor")
 
 // maxRespBytes caps how much of a response body is read into memory.
 const maxRespBytes = 1 << 20 // 1 MiB
@@ -109,6 +115,22 @@ func (e *Executor) SetMetrics(m *Metrics) {
 // Execute runs req with retry/breaker/rate-limit/concurrency controls. connID
 // and intID key the per-connection and per-integration state.
 func (e *Executor) Execute(ctx context.Context, connID, intID string, req Request) (res *Result, err error) {
+	ctx, span := tracer.Start(ctx, "executor.execute",
+		trace.WithAttributes(
+			attribute.String("integrationhub.connection_id", connID),
+			attribute.String("integrationhub.integration_id", intID),
+			attribute.String("integrationhub.method", req.Method),
+			attribute.String("integrationhub.url", req.URL),
+		),
+	)
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		}
+		span.End()
+	}()
+
 	if err := e.limiters.get(connID).Wait(ctx); err != nil {
 		return nil, err
 	}
