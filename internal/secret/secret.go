@@ -36,15 +36,6 @@ func New(key []byte) (*Cipher, error) {
 	return &Cipher{aead: aead}, nil
 }
 
-// NewFromBase64 builds a Cipher from a base64-encoded 32-byte key.
-func NewFromBase64(encoded string) (*Cipher, error) {
-	key, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		return nil, fmt.Errorf("secret: decode key: %w", err)
-	}
-	return New(key)
-}
-
 // Encrypt seals plaintext and returns a base64 string (nonce||ciphertext).
 func (c *Cipher) Encrypt(plaintext []byte) (string, error) {
 	nonce := make([]byte, c.aead.NonceSize())

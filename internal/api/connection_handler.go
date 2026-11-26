@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -168,8 +169,10 @@ func (h *ConnectionHandler) OAuthAuthorize(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	cfg := oauthConfigFrom(c, creds)
+	verifier := h.oauth.NewVerifier()
 	state := h.oauth.SignState(c.ID)
-	http.Redirect(w, r, h.oauth.AuthCodeURL(cfg, state), http.StatusFound)
+	h.oauth.SaveVerifier(state, verifier)
+	http.Redirect(w, r, h.oauth.AuthCodeURL(cfg, state, verifier), http.StatusFound)
 }
 
 // OAuthCallback handles the provider redirect, exchanges the code, and stores
@@ -193,12 +196,17 @@ func (h *ConnectionHandler) OAuthCallback(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "missing authorization code")
 		return
 	}
+	verifier, ok := h.oauth.TakeVerifier(r.URL.Query().Get("state"))
+	if !ok {
+		writeError(w, http.StatusBadRequest, "missing or expired PKCE verifier")
+		return
+	}
 	creds, err := h.decryptCreds(c)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to decrypt credentials")
 		return
 	}
-	tok, err := h.oauth.Exchange(r.Context(), oauthConfigFrom(c, creds), code)
+	tok, err := h.oauth.Exchange(r.Context(), oauthConfigFrom(c, creds), code, verifier)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "token exchange failed")
 		return
@@ -299,7 +307,10 @@ func (h *ConnectionHandler) Test(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "latency_ms": latency, "error": err.Error()})
 		return
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":          resp.StatusCode < 400,
 		"status_code": resp.StatusCode,

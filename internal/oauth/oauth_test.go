@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -23,6 +24,35 @@ func TestStateSignVerify(t *testing.T) {
 	}
 	if m.VerifyState("", "conn-1") {
 		t.Fatal("empty state must not validate")
+	}
+}
+
+func TestPKCEVerifierLifecycle(t *testing.T) {
+	m := NewManager([]byte("k"))
+	v := m.NewVerifier()
+	if v == "" {
+		t.Fatal("empty verifier")
+	}
+	state := m.SignState("c1")
+	m.SaveVerifier(state, v)
+	got, ok := m.TakeVerifier(state)
+	if !ok || got != v {
+		t.Fatalf("verifier mismatch: got %q ok=%v", got, ok)
+	}
+	if _, ok := m.TakeVerifier(state); ok {
+		t.Fatal("verifier must be consumed after first take")
+	}
+}
+
+func TestAuthCodeURLHasPKCEChallenge(t *testing.T) {
+	m := NewManager([]byte("k"))
+	cfg := Config{ClientID: "id", AuthURL: "https://provider/auth", TokenURL: "https://provider/token", RedirectURL: "http://localhost/cb"}
+	u := m.AuthCodeURL(cfg, "state123", m.NewVerifier())
+	if !strings.Contains(u, "code_challenge=") {
+		t.Fatalf("missing PKCE challenge: %s", u)
+	}
+	if !strings.Contains(u, "state=state123") {
+		t.Fatalf("missing state: %s", u)
 	}
 }
 
@@ -47,7 +77,7 @@ func TestExchangeAndRefresh(t *testing.T) {
 	m := NewManager([]byte("k"))
 	cfg := Config{ClientID: "id", ClientSecret: "sec", AuthURL: srv.URL + "/auth", TokenURL: srv.URL, RedirectURL: "http://localhost/cb"}
 
-	tok, err := m.Exchange(context.Background(), cfg, "the-code")
+	tok, err := m.Exchange(context.Background(), cfg, "the-code", "the-verifier")
 	if err != nil {
 		t.Fatalf("Exchange: %v", err)
 	}

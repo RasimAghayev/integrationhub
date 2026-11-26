@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -63,24 +64,66 @@ func (t *Token) oauth2Token() *oauth2.Token {
 	}
 }
 
-// Manager signs/validates OAuth2 state and performs token exchanges.
+// Manager signs/validates OAuth2 state and performs token exchanges. It also
+// holds the short-lived PKCE code verifiers between authorize and callback.
 type Manager struct {
 	stateKey []byte
+
+	mu        sync.Mutex
+	verifiers map[string]verifierEntry
+}
+
+type verifierEntry struct {
+	verifier string
+	expires  time.Time
 }
 
 // NewManager builds a Manager. stateKey should be a stable server secret.
 func NewManager(stateKey []byte) *Manager {
-	return &Manager{stateKey: stateKey}
+	return &Manager{stateKey: stateKey, verifiers: map[string]verifierEntry{}}
 }
 
-// AuthCodeURL returns the provider authorization URL for the given state.
-func (m *Manager) AuthCodeURL(cfg Config, state string) string {
-	return cfg.oauth2Config().AuthCodeURL(state, oauth2.AccessTypeOffline)
+// NewVerifier returns a fresh PKCE code verifier.
+func (m *Manager) NewVerifier() string { return oauth2.GenerateVerifier() }
+
+// SaveVerifier stores a PKCE verifier keyed by state, dropping expired entries.
+func (m *Manager) SaveVerifier(state, verifier string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now()
+	for k, v := range m.verifiers {
+		if v.expires.Before(now) {
+			delete(m.verifiers, k)
+		}
+	}
+	m.verifiers[state] = verifierEntry{verifier: verifier, expires: now.Add(10 * time.Minute)}
 }
 
-// Exchange trades an authorization code for tokens.
-func (m *Manager) Exchange(ctx context.Context, cfg Config, code string) (*Token, error) {
-	t, err := cfg.oauth2Config().Exchange(ctx, code)
+// TakeVerifier returns and removes the verifier for state.
+func (m *Manager) TakeVerifier(state string) (string, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	v, ok := m.verifiers[state]
+	if !ok || v.expires.Before(time.Now()) {
+		delete(m.verifiers, state)
+		return "", false
+	}
+	delete(m.verifiers, state)
+	return v.verifier, true
+}
+
+// AuthCodeURL returns the provider authorization URL for the given state,
+// including the S256 PKCE code challenge for verifier.
+func (m *Manager) AuthCodeURL(cfg Config, state, verifier string) string {
+	return cfg.oauth2Config().AuthCodeURL(state,
+		oauth2.AccessTypeOffline,
+		oauth2.S256ChallengeOption(verifier),
+	)
+}
+
+// Exchange trades an authorization code for tokens, presenting the PKCE verifier.
+func (m *Manager) Exchange(ctx context.Context, cfg Config, code, verifier string) (*Token, error) {
+	t, err := cfg.oauth2Config().Exchange(ctx, code, oauth2.VerifierOption(verifier))
 	if err != nil {
 		return nil, fmt.Errorf("oauth: exchange: %w", err)
 	}

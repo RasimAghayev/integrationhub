@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/RasimAghayev/integrationhub/internal/secret"
 	"github.com/RasimAghayev/integrationhub/internal/store"
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
@@ -45,7 +47,7 @@ func main() {
 	initCtx, initCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer initCancel()
 
-	pool, err := pgxpool.New(initCtx, dbDSN())
+	pool, err := newPool(initCtx)
 	if err != nil {
 		slog.Error("postgres pool init failed", "error", err)
 		os.Exit(1)
@@ -110,7 +112,10 @@ type routerDeps struct {
 
 func newRouter(d routerDeps) http.Handler {
 	router := chi.NewRouter()
+	router.Use(middleware.Recoverer)
+	router.Use(middleware.RequestID)
 	router.Use(metricsMiddleware)
+	router.Use(middleware.Timeout(30 * time.Second))
 	router.Get("/", handleRoot)
 	router.Get("/healthz", handleHealthz)
 	router.Get("/readyz", handleReadyz)
@@ -193,6 +198,28 @@ func statusString(ok bool) string {
 		return "up"
 	}
 	return "degraded"
+}
+
+func newPool(ctx context.Context) (*pgxpool.Pool, error) {
+	cfg, err := pgxpool.ParseConfig(dbDSN())
+	if err != nil {
+		return nil, err
+	}
+	cfg.MaxConns = envInt32("INTEGRATIONHUB_DB_MAX_CONNS", 10)
+	cfg.MinConns = envInt32("INTEGRATIONHUB_DB_MIN_CONNS", 0)
+	cfg.MaxConnLifetime = time.Hour
+	cfg.MaxConnIdleTime = 30 * time.Minute
+	cfg.HealthCheckPeriod = time.Minute
+	return pgxpool.NewWithConfig(ctx, cfg)
+}
+
+func envInt32(key string, def int32) int32 {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return int32(n)
+		}
+	}
+	return def
 }
 
 func dbDSN() string {
