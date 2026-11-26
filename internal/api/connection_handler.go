@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/RasimAghayev/integrationhub/internal/connauth"
 	"github.com/RasimAghayev/integrationhub/internal/domain"
 	"github.com/RasimAghayev/integrationhub/internal/oauth"
 	"github.com/RasimAghayev/integrationhub/internal/secret"
@@ -175,7 +176,7 @@ func (h *ConnectionHandler) OAuthAuthorize(w http.ResponseWriter, r *http.Reques
 		writeNotFound(w, err)
 		return
 	}
-	creds, err := h.decryptCreds(c)
+	creds, err := connauth.Credentials(h.cipher, c)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to decrypt credentials")
 		return
@@ -213,7 +214,7 @@ func (h *ConnectionHandler) OAuthCallback(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "missing or expired PKCE verifier")
 		return
 	}
-	creds, err := h.decryptCreds(c)
+	creds, err := connauth.Credentials(h.cipher, c)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to decrypt credentials")
 		return
@@ -241,7 +242,7 @@ func (h *ConnectionHandler) OAuthRefresh(w http.ResponseWriter, r *http.Request)
 		writeNotFound(w, err)
 		return
 	}
-	creds, err := h.decryptCreds(c)
+	creds, err := connauth.Credentials(h.cipher, c)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to decrypt credentials")
 		return
@@ -282,12 +283,12 @@ func (h *ConnectionHandler) Test(w http.ResponseWriter, r *http.Request) {
 		writeNotFound(w, err)
 		return
 	}
-	base := strings.TrimRight(stringVal(c.Config["base_url"]), "/")
+	base := strings.TrimRight(connauth.String(c.Config["base_url"]), "/")
 	if base == "" {
 		writeError(w, http.StatusBadRequest, "connection has no base_url")
 		return
 	}
-	healthPath := stringVal(c.Config["health_path"])
+	healthPath := connauth.String(c.Config["health_path"])
 	if healthPath == "" {
 		healthPath = "/health"
 	}
@@ -300,14 +301,16 @@ func (h *ConnectionHandler) Test(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid base_url")
 		return
 	}
-	if err := h.applyAuth(req, c); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to apply auth")
+	creds, err := connauth.Credentials(h.cipher, c)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to decrypt credentials")
 		return
 	}
+	connauth.Apply(req, c, creds)
 
 	timeout := 10 * time.Second
 	if v, ok := c.Config["timeout_ms"]; ok {
-		if ms, err := strconv.Atoi(stringVal(v)); err == nil && ms > 0 {
+		if ms, err := strconv.Atoi(connauth.String(v)); err == nil && ms > 0 {
 			timeout = time.Duration(ms) * time.Millisecond
 		}
 	}
@@ -343,81 +346,15 @@ func (h *ConnectionHandler) storeToken(ctx context.Context, c *domain.Connection
 	return h.store.Update(ctx, c)
 }
 
-func (h *ConnectionHandler) decryptCreds(c *domain.Connection) (map[string]any, error) {
-	if c.SecretRef == "" || h.cipher == nil {
-		return map[string]any{}, nil
-	}
-	raw, err := h.cipher.Decrypt(c.SecretRef)
-	if err != nil {
-		return nil, err
-	}
-	creds := map[string]any{}
-	if len(raw) > 0 {
-		if err := json.Unmarshal(raw, &creds); err != nil {
-			return nil, err
-		}
-	}
-	return creds, nil
-}
-
-func (h *ConnectionHandler) applyAuth(req *http.Request, c *domain.Connection) error {
-	creds, err := h.decryptCreds(c)
-	if err != nil {
-		return err
-	}
-	switch c.AuthType {
-	case domain.AuthAPIKey:
-		header := stringVal(c.Config["api_key_header"])
-		if header == "" {
-			header = "X-API-Key"
-		}
-		req.Header.Set(header, stringVal(creds["api_key"]))
-	case domain.AuthBasic:
-		req.SetBasicAuth(stringVal(creds["username"]), stringVal(creds["password"]))
-	case domain.AuthOAuth2:
-		req.Header.Set("Authorization", "Bearer "+stringVal(creds["access_token"]))
-	}
-	return nil
-}
-
 func oauthConfigFrom(c *domain.Connection, creds map[string]any) oauth.Config {
 	return oauth.Config{
-		ClientID:     stringVal(creds["client_id"]),
-		ClientSecret: stringVal(creds["client_secret"]),
-		AuthURL:      stringVal(c.Config["auth_url"]),
-		TokenURL:     stringVal(c.Config["token_url"]),
-		RedirectURL:  stringVal(c.Config["redirect_url"]),
-		Scopes:       stringSlice(c.Config["scopes"]),
+		ClientID:     connauth.String(creds["client_id"]),
+		ClientSecret: connauth.String(creds["client_secret"]),
+		AuthURL:      connauth.String(c.Config["auth_url"]),
+		TokenURL:     connauth.String(c.Config["token_url"]),
+		RedirectURL:  connauth.String(c.Config["redirect_url"]),
+		Scopes:       connauth.Strings(c.Config["scopes"]),
 	}
-}
-
-func stringVal(v any) string {
-	if v == nil {
-		return ""
-	}
-	if s, ok := v.(string); ok {
-		return s
-	}
-	return ""
-}
-
-func stringSlice(v any) []string {
-	switch t := v.(type) {
-	case []any:
-		out := make([]string, 0, len(t))
-		for _, e := range t {
-			out = append(out, stringVal(e))
-		}
-		return out
-	case []string:
-		return t
-	case string:
-		if t == "" {
-			return nil
-		}
-		return strings.Split(t, ",")
-	}
-	return nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

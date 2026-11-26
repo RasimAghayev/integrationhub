@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/RasimAghayev/integrationhub/internal/api"
+	"github.com/RasimAghayev/integrationhub/internal/execution"
 	"github.com/RasimAghayev/integrationhub/internal/executor"
 	"github.com/RasimAghayev/integrationhub/internal/oauth"
 	"github.com/RasimAghayev/integrationhub/internal/secret"
@@ -87,8 +88,14 @@ func main() {
 	prometheus.MustRegister(execMetrics.Collectors()...)
 	exec := executor.New(executor.DefaultConfig(), nil)
 	exec.SetMetrics(execMetrics)
-	intHandler := api.NewIntegrationHandler(store.NewIntegrationStore(pool)).
-		WithExecutor(exec, connStore)
+	intStore := store.NewIntegrationStore(pool)
+	execSvc := execution.New(store.NewExecutionStore(pool), intStore, connStore, exec, cipher)
+	execSvc.SetWorkers(envInt("INTEGRATIONHUB_EXEC_WORKERS", 4))
+	workerCtx, workerCancel := context.WithCancel(context.Background())
+	defer workerCancel()
+	execSvc.StartWorker(workerCtx, time.Duration(envInt("INTEGRATIONHUB_EXEC_POLL_MS", 1000))*time.Millisecond)
+	intHandler := api.NewIntegrationHandler(intStore)
+	execHandler := api.NewExecutionHandler(execSvc, intStore)
 	limiter := api.NewRateLimiter(
 		rate.Limit(envInt("INTEGRATIONHUB_RATE_PER_SEC", 100)),
 		envInt("INTEGRATIONHUB_RATE_BURST", 200),
@@ -97,6 +104,7 @@ func main() {
 	router := newRouter(routerDeps{
 		conn:    connHandler,
 		int:     intHandler,
+		exec:    execHandler,
 		limiter: limiter,
 		cors:    splitCSV(os.Getenv("INTEGRATIONHUB_CORS_ORIGINS")),
 	})
@@ -135,6 +143,7 @@ func main() {
 type routerDeps struct {
 	conn    *api.ConnectionHandler
 	int     *api.IntegrationHandler
+	exec    *api.ExecutionHandler
 	limiter *api.RateLimiter
 	cors    []string
 }
@@ -174,7 +183,16 @@ func newRouter(d routerDeps) http.Handler {
 			r.Get("/{id}", d.int.Get)
 			r.Put("/{id}", d.int.Update)
 			r.Delete("/{id}", d.int.Delete)
-			r.Post("/{id}/execute", d.int.Execute)
+			r.Post("/{id}/execute", d.exec.Execute)
+		})
+	}
+	if d.exec != nil {
+		router.Route("/api/v1/executions", func(r chi.Router) {
+			r.Get("/", d.exec.List)
+			r.Get("/counts", d.exec.Counts)
+			r.Get("/dead", d.exec.Dead)
+			r.Get("/{id}", d.exec.Get)
+			r.Post("/{id}/replay", d.exec.Replay)
 		})
 	}
 	return router

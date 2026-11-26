@@ -2,13 +2,9 @@ package api
 
 import (
 	"context"
-	"errors"
 	"net/http"
-	"strings"
-	"time"
 
 	"github.com/RasimAghayev/integrationhub/internal/domain"
-	"github.com/RasimAghayev/integrationhub/internal/executor"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -24,23 +20,11 @@ type IntegrationStore interface {
 // IntegrationHandler serves integration CRUD endpoints.
 type IntegrationHandler struct {
 	store IntegrationStore
-	exec  *executor.Executor
-	conns ConnectionStore
-	idem  *idempotencyStore
 }
 
 // NewIntegrationHandler builds an IntegrationHandler.
 func NewIntegrationHandler(store IntegrationStore) *IntegrationHandler {
 	return &IntegrationHandler{store: store}
-}
-
-// WithExecutor enables the manual execute endpoint by supplying the execution
-// engine and the connection store used to resolve base URLs.
-func (h *IntegrationHandler) WithExecutor(exec *executor.Executor, conns ConnectionStore) *IntegrationHandler {
-	h.exec = exec
-	h.conns = conns
-	h.idem = newIdempotencyStore(24 * time.Hour)
-	return h
 }
 
 type integrationRequest struct {
@@ -142,83 +126,4 @@ func (h *IntegrationHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-
-type executeRequest struct {
-	Endpoint string `json:"endpoint"`
-}
-
-// Execute manually triggers a single endpoint of an integration.
-func (h *IntegrationHandler) Execute(w http.ResponseWriter, r *http.Request) {
-	if h.exec == nil || h.conns == nil {
-		writeError(w, http.StatusServiceUnavailable, "execution engine not configured")
-		return
-	}
-	id := chi.URLParam(r, "id")
-	in, err := h.store.Get(r.Context(), id)
-	if err != nil {
-		writeNotFound(w, err)
-		return
-	}
-	var req executeRequest
-	if status, msg := decodeJSON(w, r, &req); status != 0 {
-		writeError(w, status, msg)
-		return
-	}
-	var ep *domain.Endpoint
-	for i := range in.Endpoints {
-		if in.Endpoints[i].Name == req.Endpoint {
-			ep = &in.Endpoints[i]
-			break
-		}
-	}
-	if ep == nil {
-		writeError(w, http.StatusBadRequest, "unknown endpoint")
-		return
-	}
-	conn, err := h.conns.Get(r.Context(), in.ConnectionID)
-	if err != nil {
-		writeNotFound(w, err)
-		return
-	}
-	baseURL := strings.TrimRight(stringVal(conn.Config["base_url"]), "/")
-
-	idemKey := r.Header.Get("Idempotency-Key")
-	var idemCacheKey string
-	if idemKey != "" && h.idem != nil {
-		idemCacheKey = idemKey + "|" + in.ID + "|" + req.Endpoint
-		if e, ok := h.idem.get(idemCacheKey); ok {
-			writeJSON(w, e.status, e.body)
-			return
-		}
-	}
-
-	res, err := h.exec.Execute(r.Context(), conn.ID, in.ID, executor.Request{
-		Method: ep.Method,
-		URL:    baseURL + ep.Path,
-	})
-	if err != nil {
-		status := http.StatusBadGateway
-		if errors.Is(err, executor.ErrOpen) {
-			status = http.StatusServiceUnavailable
-		}
-		body := map[string]any{"ok": false, "error": err.Error()}
-		if res != nil {
-			body["attempts"] = res.Attempts
-			body["latency_ms"] = res.Latency.Milliseconds()
-		}
-		writeJSON(w, status, body)
-		return
-	}
-	body := map[string]any{
-		"ok":          true,
-		"status_code": res.StatusCode,
-		"attempts":    res.Attempts,
-		"latency_ms":  res.Latency.Milliseconds(),
-		"body":        string(res.Body),
-	}
-	if idemCacheKey != "" {
-		h.idem.set(idemCacheKey, http.StatusOK, body)
-	}
-	writeJSON(w, http.StatusOK, body)
 }
