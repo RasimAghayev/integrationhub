@@ -184,3 +184,45 @@ func TestExecutionStoreLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 2, counts[domain.ExecutionQueued])
 }
+
+func TestAPIKeyStore(t *testing.T) {
+	ctx := context.Background()
+	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: testcontainers.ContainerRequest{
+			Image:        "postgres:16-alpine",
+			Env:          map[string]string{"POSTGRES_USER": "integrationhub", "POSTGRES_PASSWORD": "test", "POSTGRES_DB": "integrationhub"},
+			ExposedPorts: []string{"5432/tcp"},
+			WaitingFor:   wait.ForLog("database system is ready to accept connections").WithOccurrence(2).WithStartupTimeout(60 * time.Second),
+		},
+		Started: true,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = container.Terminate(ctx) })
+
+	port, err := container.MappedPort(ctx, "5432/tcp")
+	require.NoError(t, err)
+	dsn := "host=localhost port=" + port.Port() + " user=integrationhub password=test dbname=integrationhub sslmode=disable"
+
+	pool, err := pgxpool.New(ctx, dsn)
+	require.NoError(t, err)
+	defer pool.Close()
+	require.NoError(t, Migrate(ctx, pool))
+
+	ks := NewAPIKeyStore(pool)
+	k := &domain.APIKey{Subject: "svc", KeyHash: "hash-1", Roles: []string{"operator"}}
+	require.NoError(t, ks.Create(ctx, k))
+	require.NotEmpty(t, k.ID)
+
+	rec, err := ks.GetByHash(ctx, "hash-1")
+	require.NoError(t, err)
+	require.Equal(t, "svc", rec.Subject)
+	require.Equal(t, []string{"operator"}, rec.Roles)
+
+	list, err := ks.List(ctx, "svc")
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+
+	require.NoError(t, ks.Delete(ctx, k.ID))
+	_, err = ks.GetByHash(ctx, "hash-1")
+	require.ErrorIs(t, err, domain.ErrNotFound)
+}

@@ -3,7 +3,9 @@ module github.com/RasimAghayev/integrationhub
 go 1.26.0
 
 require (
+	github.com/casbin/casbin/v2 v2.135.0
 	github.com/go-chi/chi/v5 v5.5.0
+	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/jackc/pgx/v5 v5.13.0
 	github.com/nats-io/nats.go v1.56.0
 	github.com/prometheus/client_golang v1.25.0
@@ -19,6 +21,8 @@ require (
 	github.com/Azure/go-ansiterm v0.0.0-20261006220739-8c912ac31dd4 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
+	github.com/bmatcuk/doublestar/v4 v4.6.1 // indirect
+	github.com/casbin/govaluate v1.3.0 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/containerd/errdefs v1.0.0 // indirect

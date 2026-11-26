@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -15,9 +16,12 @@ import (
 	"time"
 
 	"github.com/RasimAghayev/integrationhub/internal/api"
+	"github.com/RasimAghayev/integrationhub/internal/auth"
+	"github.com/RasimAghayev/integrationhub/internal/domain"
 	"github.com/RasimAghayev/integrationhub/internal/execution"
 	"github.com/RasimAghayev/integrationhub/internal/executor"
 	"github.com/RasimAghayev/integrationhub/internal/oauth"
+	"github.com/RasimAghayev/integrationhub/internal/rbac"
 	"github.com/RasimAghayev/integrationhub/internal/secret"
 	"github.com/RasimAghayev/integrationhub/internal/store"
 	"github.com/go-chi/chi/v5"
@@ -84,6 +88,30 @@ func main() {
 
 	connStore := store.NewConnectionStore(pool)
 	connHandler := api.NewConnectionHandler(connStore, cipher, oauthMgr)
+
+	keyStore := store.NewAPIKeyStore(pool)
+	var authenticator *auth.Authenticator
+	var authHandler *api.AuthHandler
+	if jwtSecret := os.Getenv("INTEGRATIONHUB_JWT_SECRET"); jwtSecret != "" {
+		jwtMgr := auth.NewJWTManager([]byte(jwtSecret), envDuration("INTEGRATIONHUB_JWT_TTL", time.Hour), "integrationhub")
+		authenticator = auth.NewAuthenticator(jwtMgr, keyStore)
+		authHandler = api.NewAuthHandler(jwtMgr, keyStore)
+	} else {
+		authenticator = auth.NewAuthenticator(nil, keyStore)
+		slog.Warn("INTEGRATIONHUB_JWT_SECRET not set; JWT authentication disabled")
+	}
+	if raw := os.Getenv("INTEGRATIONHUB_ADMIN_API_KEY"); raw != "" {
+		if err := seedAdminKey(initCtx, keyStore, raw); err != nil {
+			slog.Error("failed to seed admin api key", "error", err)
+			os.Exit(1)
+		}
+	}
+
+	enforcer, err := rbac.New(rbacPolicy())
+	if err != nil {
+		slog.Error("failed to build rbac enforcer", "error", err)
+		os.Exit(1)
+	}
 	execMetrics := executor.NewMetrics()
 	prometheus.MustRegister(execMetrics.Collectors()...)
 	exec := executor.New(executor.DefaultConfig(), nil)
@@ -105,6 +133,9 @@ func main() {
 		conn:    connHandler,
 		int:     intHandler,
 		exec:    execHandler,
+		auth:    authenticator,
+		authAPI: authHandler,
+		rbac:    enforcer,
 		limiter: limiter,
 		cors:    splitCSV(os.Getenv("INTEGRATIONHUB_CORS_ORIGINS")),
 	})
@@ -144,6 +175,9 @@ type routerDeps struct {
 	conn    *api.ConnectionHandler
 	int     *api.IntegrationHandler
 	exec    *api.ExecutionHandler
+	auth    *auth.Authenticator
+	authAPI *api.AuthHandler
+	rbac    *rbac.Enforcer
 	limiter *api.RateLimiter
 	cors    []string
 }
@@ -163,38 +197,47 @@ func newRouter(d routerDeps) http.Handler {
 	router.Get("/healthz", handleHealthz)
 	router.Get("/readyz", handleReadyz)
 	router.Get("/metrics", promhttp.Handler().ServeHTTP)
-	if d.conn != nil {
-		router.Route("/api/v1/connections", func(r chi.Router) {
-			r.Get("/", d.conn.List)
-			r.Post("/", d.conn.Create)
-			r.Get("/{id}", d.conn.Get)
-			r.Put("/{id}", d.conn.Update)
-			r.Delete("/{id}", d.conn.Delete)
-			r.Post("/{id}/test", d.conn.Test)
-			r.Get("/{id}/oauth/authorize", d.conn.OAuthAuthorize)
-			r.Get("/{id}/oauth/callback", d.conn.OAuthCallback)
-			r.Post("/{id}/oauth/refresh", d.conn.OAuthRefresh)
-		})
+	if d.authAPI != nil {
+		router.Post("/api/v1/auth/token", d.authAPI.Token)
 	}
-	if d.int != nil {
-		router.Route("/api/v1/integrations", func(r chi.Router) {
-			r.Get("/", d.int.List)
-			r.Post("/", d.int.Create)
-			r.Get("/{id}", d.int.Get)
-			r.Put("/{id}", d.int.Update)
-			r.Delete("/{id}", d.int.Delete)
-			r.Post("/{id}/execute", d.exec.Execute)
-		})
-	}
-	if d.exec != nil {
-		router.Route("/api/v1/executions", func(r chi.Router) {
-			r.Get("/", d.exec.List)
-			r.Get("/counts", d.exec.Counts)
-			r.Get("/dead", d.exec.Dead)
-			r.Get("/{id}", d.exec.Get)
-			r.Post("/{id}/replay", d.exec.Replay)
-		})
-	}
+	router.Group(func(r chi.Router) {
+		r.Use(d.auth.Middleware)
+		r.Use(d.rbac.Middleware(resourceFor))
+		if d.conn != nil {
+			r.Route("/api/v1/connections", func(r chi.Router) {
+				r.Get("/", d.conn.List)
+				r.Post("/", d.conn.Create)
+				r.Get("/{id}", d.conn.Get)
+				r.Put("/{id}", d.conn.Update)
+				r.Delete("/{id}", d.conn.Delete)
+				r.Post("/{id}/test", d.conn.Test)
+				r.Get("/{id}/oauth/authorize", d.conn.OAuthAuthorize)
+				r.Get("/{id}/oauth/callback", d.conn.OAuthCallback)
+				r.Post("/{id}/oauth/refresh", d.conn.OAuthRefresh)
+			})
+		}
+		if d.int != nil {
+			r.Route("/api/v1/integrations", func(r chi.Router) {
+				r.Get("/", d.int.List)
+				r.Post("/", d.int.Create)
+				r.Get("/{id}", d.int.Get)
+				r.Put("/{id}", d.int.Update)
+				r.Delete("/{id}", d.int.Delete)
+				if d.exec != nil {
+					r.Post("/{id}/execute", d.exec.Execute)
+				}
+			})
+		}
+		if d.exec != nil {
+			r.Route("/api/v1/executions", func(r chi.Router) {
+				r.Get("/", d.exec.List)
+				r.Get("/counts", d.exec.Counts)
+				r.Get("/dead", d.exec.Dead)
+				r.Get("/{id}", d.exec.Get)
+				r.Post("/{id}/replay", d.exec.Replay)
+			})
+		}
+	})
 	return router
 }
 
@@ -348,6 +391,54 @@ func envInt(key string, def int) int {
 		}
 	}
 	return def
+}
+
+func envDuration(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return def
+}
+
+// resourceFor maps a request path to the RBAC resource it touches.
+func resourceFor(r *http.Request) string {
+	p := r.URL.Path
+	switch {
+	case strings.HasPrefix(p, "/api/v1/connections"):
+		return "connections"
+	case strings.HasPrefix(p, "/api/v1/integrations"):
+		return "integrations"
+	case strings.HasPrefix(p, "/api/v1/executions"):
+		return "executions"
+	}
+	return ""
+}
+
+// rbacPolicy loads the policy from a file, an inline CSV, or the defaults.
+func rbacPolicy() string {
+	if path := os.Getenv("INTEGRATIONHUB_RBAC_POLICY_FILE"); path != "" {
+		if b, err := os.ReadFile(path); err == nil {
+			return string(b)
+		}
+		slog.Warn("INTEGRATIONHUB_RBAC_POLICY_FILE unreadable", "path", path)
+	}
+	if p := os.Getenv("INTEGRATIONHUB_RBAC_POLICY"); p != "" {
+		return p
+	}
+	return rbac.DefaultPolicy
+}
+
+// seedAdminKey creates the bootstrap admin API key when it does not exist yet.
+func seedAdminKey(ctx context.Context, s *store.APIKeyStore, raw string) error {
+	hash := auth.HashKey(raw)
+	if _, err := s.GetByHash(ctx, hash); err == nil {
+		return nil
+	} else if !errors.Is(err, domain.ErrNotFound) {
+		return err
+	}
+	return s.Create(ctx, &domain.APIKey{Subject: "admin", KeyHash: hash, Roles: []string{"admin"}})
 }
 
 func splitCSV(s string) []string {
