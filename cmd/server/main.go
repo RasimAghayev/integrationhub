@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -14,11 +14,22 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/nats-io/nats.go"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 )
 
+var httpRequests = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "integrationhub_http_requests_total",
+		Help: "Total number of HTTP requests processed.",
+	},
+	[]string{"method", "path"},
+)
+
 func main() {
-	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	slog.SetDefault(slog.New(newSlogHandler()))
+	prometheus.MustRegister(httpRequests)
 
 	addr := ":8080"
 	if v := os.Getenv("INTEGRATIONHUB_SERVER_PORT"); v != "" {
@@ -26,9 +37,11 @@ func main() {
 	}
 
 	router := chi.NewRouter()
+	router.Use(metricsMiddleware)
 	router.Get("/", handleRoot)
 	router.Get("/healthz", handleHealthz)
 	router.Get("/readyz", handleReadyz)
+	router.Get("/metrics", promhttp.Handler().ServeHTTP)
 
 	srv := &http.Server{
 		Addr:    addr,
@@ -39,8 +52,10 @@ func main() {
 	}
 
 	go func() {
+		slog.Info("server starting", "addr", addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server error: %v", err)
+			slog.Error("server error", "error", err)
+			os.Exit(1)
 		}
 	}()
 
@@ -51,7 +66,18 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(ctx)
-	log.Println("server stopped")
+	slog.Info("server stopped")
+}
+
+func newSlogHandler() slog.Handler {
+	return slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})
+}
+
+func metricsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r)
+		httpRequests.WithLabelValues(r.Method, r.URL.Path).Inc()
+	})
 }
 
 func handleRoot(w http.ResponseWriter, r *http.Request) {
@@ -116,7 +142,7 @@ func checkPostgres(ctx context.Context) bool {
 	dsn := "host=" + host + " port=" + port + " user=" + user + " password=" + pass + " dbname=" + name + " sslmode=disable connect_timeout=2"
 	_, err := pgx.Connect(ctx, dsn)
 	if err != nil {
-		log.Printf("postgres check error: %v", err)
+		slog.Error("postgres check failed", "error", err)
 		return false
 	}
 	return true
@@ -134,7 +160,7 @@ func checkRedis(ctx context.Context) bool {
 	defer rdb.Close()
 	_, err := rdb.Ping(ctx).Result()
 	if err != nil {
-		log.Printf("redis check error: %v", err)
+		slog.Error("redis check failed", "error", err)
 	}
 	return err == nil
 }
@@ -143,6 +169,7 @@ func checkNATS(ctx context.Context) bool {
 	url := env("INTEGRATIONHUB_NATS_URL", "nats://localhost:4222")
 	nc, err := nats.Connect(url, nats.Timeout(2*time.Second))
 	if err != nil {
+		slog.Error("nats check failed", "error", err)
 		return false
 	}
 	defer nc.Close()
