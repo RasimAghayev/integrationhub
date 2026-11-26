@@ -13,8 +13,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
-	"github.com/redis/go-redis/v9"
 	"github.com/nats-io/nats.go"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -31,7 +31,7 @@ func main() {
 	router.Get("/readyz", handleReadyz)
 
 	srv := &http.Server{
-		Addr: addr,
+		Addr:    addr,
 		Handler: router,
 		BaseContext: func(net.Listener) context.Context {
 			return context.Background()
@@ -57,8 +57,8 @@ func main() {
 func handleRoot(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{
-		"service":  "integrationhub",
-		"version":  "0.1.0",
+		"service": "integrationhub",
+		"version": "0.1.0",
 	})
 }
 
