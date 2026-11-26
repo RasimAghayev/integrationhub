@@ -33,7 +33,7 @@ func TestMetricsEndpoint(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	rec := httptest.NewRecorder()
 
-	newRouter().ServeHTTP(rec, req)
+	newRouter(routerDeps{}).ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.True(t, strings.Contains(rec.Body.String(), "go_"))
