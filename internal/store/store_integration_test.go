@@ -4,6 +4,7 @@ package store
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 
@@ -13,6 +14,16 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
+
+// dbHost returns the host testcontainers publishes ports on. It defaults to
+// localhost and can be overridden when the tests run inside a container, for
+// example INTEGRATIONHUB_TEST_DB_HOST=host.docker.internal.
+func dbHost() string {
+	if h := os.Getenv("INTEGRATIONHUB_TEST_DB_HOST"); h != "" {
+		return h
+	}
+	return "localhost"
+}
 
 func TestConnectionStoreCRUD(t *testing.T) {
 	ctx := context.Background()
@@ -30,7 +41,7 @@ func TestConnectionStoreCRUD(t *testing.T) {
 
 	port, err := container.MappedPort(ctx, "5432/tcp")
 	require.NoError(t, err)
-	dsn := "host=localhost port=" + port.Port() + " user=integrationhub password=test dbname=integrationhub sslmode=disable"
+	dsn := "host=" + dbHost() + " port=" + port.Port() + " user=integrationhub password=test dbname=integrationhub sslmode=disable"
 
 	pool, err := pgxpool.New(ctx, dsn)
 	require.NoError(t, err)
@@ -77,7 +88,7 @@ func TestIntegrationStoreCRUD(t *testing.T) {
 
 	port, err := container.MappedPort(ctx, "5432/tcp")
 	require.NoError(t, err)
-	dsn := "host=localhost port=" + port.Port() + " user=integrationhub password=test dbname=integrationhub sslmode=disable"
+	dsn := "host=" + dbHost() + " port=" + port.Port() + " user=integrationhub password=test dbname=integrationhub sslmode=disable"
 
 	pool, err := pgxpool.New(ctx, dsn)
 	require.NoError(t, err)
@@ -122,7 +133,7 @@ func TestExecutionStoreLifecycle(t *testing.T) {
 
 	port, err := container.MappedPort(ctx, "5432/tcp")
 	require.NoError(t, err)
-	dsn := "host=localhost port=" + port.Port() + " user=integrationhub password=test dbname=integrationhub sslmode=disable"
+	dsn := "host=" + dbHost() + " port=" + port.Port() + " user=integrationhub password=test dbname=integrationhub sslmode=disable"
 
 	pool, err := pgxpool.New(ctx, dsn)
 	require.NoError(t, err)
@@ -182,7 +193,9 @@ func TestExecutionStoreLifecycle(t *testing.T) {
 
 	counts, err := es.CountByStatus(ctx)
 	require.NoError(t, err)
-	require.Equal(t, 2, counts[domain.ExecutionQueued])
+	require.Equal(t, 1, counts[domain.ExecutionQueued])
+	require.Equal(t, 1, counts[domain.ExecutionSucceeded])
+	require.Equal(t, 0, counts[domain.ExecutionDead])
 }
 
 func TestAPIKeyStore(t *testing.T) {
@@ -201,7 +214,7 @@ func TestAPIKeyStore(t *testing.T) {
 
 	port, err := container.MappedPort(ctx, "5432/tcp")
 	require.NoError(t, err)
-	dsn := "host=localhost port=" + port.Port() + " user=integrationhub password=test dbname=integrationhub sslmode=disable"
+	dsn := "host=" + dbHost() + " port=" + port.Port() + " user=integrationhub password=test dbname=integrationhub sslmode=disable"
 
 	pool, err := pgxpool.New(ctx, dsn)
 	require.NoError(t, err)

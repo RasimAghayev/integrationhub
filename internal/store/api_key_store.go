@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/RasimAghayev/integrationhub/internal/auth"
 	"github.com/RasimAghayev/integrationhub/internal/domain"
@@ -44,13 +45,17 @@ func (s *APIKeyStore) Create(ctx context.Context, k *domain.APIKey) error {
 func (s *APIKeyStore) GetByHash(ctx context.Context, hash string) (*auth.KeyRecord, error) {
 	var rec auth.KeyRecord
 	var roles []byte
+	var expires *time.Time
 	if err := s.pool.QueryRow(ctx, `
 		SELECT id, subject, roles, expires_at FROM api_keys WHERE key_hash = $1`, hash,
-	).Scan(&rec.ID, &rec.Subject, &roles, &rec.ExpiresAt); err != nil {
+	).Scan(&rec.ID, &rec.Subject, &roles, &expires); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, domain.ErrNotFound
 		}
 		return nil, fmt.Errorf("store: get api key: %w", err)
+	}
+	if expires != nil {
+		rec.ExpiresAt = *expires
 	}
 	if len(roles) > 0 {
 		if err := json.Unmarshal(roles, &rec.Roles); err != nil {
@@ -74,8 +79,12 @@ func (s *APIKeyStore) List(ctx context.Context, subject string) ([]*domain.APIKe
 	for rows.Next() {
 		var k domain.APIKey
 		var roles []byte
-		if err := rows.Scan(&k.ID, &k.Subject, &k.KeyHash, &roles, &k.ExpiresAt, &k.CreatedAt); err != nil {
+		var expires *time.Time
+		if err := rows.Scan(&k.ID, &k.Subject, &k.KeyHash, &roles, &expires, &k.CreatedAt); err != nil {
 			return nil, fmt.Errorf("store: scan api key: %w", err)
+		}
+		if expires != nil {
+			k.ExpiresAt = *expires
 		}
 		if len(roles) > 0 {
 			if err := json.Unmarshal(roles, &k.Roles); err != nil {
