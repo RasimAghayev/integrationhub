@@ -36,12 +36,7 @@ func main() {
 		addr = ":" + v
 	}
 
-	router := chi.NewRouter()
-	router.Use(metricsMiddleware)
-	router.Get("/", handleRoot)
-	router.Get("/healthz", handleHealthz)
-	router.Get("/readyz", handleReadyz)
-	router.Get("/metrics", promhttp.Handler().ServeHTTP)
+	router := newRouter()
 
 	srv := &http.Server{
 		Addr:    addr,
@@ -67,6 +62,16 @@ func main() {
 	defer cancel()
 	_ = srv.Shutdown(ctx)
 	slog.Info("server stopped")
+}
+
+func newRouter() http.Handler {
+	router := chi.NewRouter()
+	router.Use(metricsMiddleware)
+	router.Get("/", handleRoot)
+	router.Get("/healthz", handleHealthz)
+	router.Get("/readyz", handleReadyz)
+	router.Get("/metrics", promhttp.Handler().ServeHTTP)
+	return router
 }
 
 func newSlogHandler() slog.Handler {

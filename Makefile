@@ -4,7 +4,7 @@ COMPOSE := docker compose -f $(COMPOSE_FILE)
 GO_IMAGE := golang:1.22
 GO_RUN := docker run --rm -v "$(CURDIR)":/app -w /app $(GO_IMAGE)
 
-.PHONY: help build test verify up down run shell logs migrate seed clean lint format security
+.PHONY: help build test test-integration verify up down run shell logs migrate seed clean lint format security
 
 help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -14,6 +14,9 @@ build: ## Build all Docker images
 
 test: ## Run all tests
 	$(GO_RUN) go test ./... -cover
+
+test-integration: ## Run integration tests (testcontainers, needs Docker)
+	$(GO_RUN) go test -tags integration ./... -cover
 
 verify: build test ## Build and test (quality gate)
 
