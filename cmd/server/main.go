@@ -18,6 +18,7 @@ import (
 	"github.com/RasimAghayev/integrationhub/internal/api"
 	"github.com/RasimAghayev/integrationhub/internal/auth"
 	"github.com/RasimAghayev/integrationhub/internal/domain"
+	"github.com/RasimAghayev/integrationhub/internal/events"
 	"github.com/RasimAghayev/integrationhub/internal/execution"
 	"github.com/RasimAghayev/integrationhub/internal/executor"
 	"github.com/RasimAghayev/integrationhub/internal/oauth"
@@ -128,11 +129,15 @@ func main() {
 	intStore := store.NewIntegrationStore(pool)
 	execSvc := execution.New(store.NewExecutionStore(pool), intStore, connStore, exec, cipher)
 	execSvc.SetWorkers(envInt("INTEGRATIONHUB_EXEC_WORKERS", 4))
+	publisher, closeEvents := newPublisher()
+	execSvc.SetPublisher(publisher)
 	workerCtx, workerCancel := context.WithCancel(context.Background())
 	defer workerCancel()
+	defer closeEvents()
 	execSvc.StartWorker(workerCtx, time.Duration(envInt("INTEGRATIONHUB_EXEC_POLL_MS", 1000))*time.Millisecond)
 	intHandler := api.NewIntegrationHandler(intStore)
 	execHandler := api.NewExecutionHandler(execSvc, intStore)
+	webhookHandler := api.NewWebhookHandler(execSvc, intStore, connStore)
 	limiter := api.NewRateLimiter(
 		rate.Limit(envInt("INTEGRATIONHUB_RATE_PER_SEC", 100)),
 		envInt("INTEGRATIONHUB_RATE_BURST", 200),
@@ -146,6 +151,7 @@ func main() {
 		authAPI: authHandler,
 		rbac:    enforcer,
 		limiter: limiter,
+		webhook: webhookHandler,
 		cors:    splitCSV(os.Getenv("INTEGRATIONHUB_CORS_ORIGINS")),
 	})
 
@@ -188,6 +194,7 @@ type routerDeps struct {
 	authAPI *api.AuthHandler
 	rbac    *rbac.Enforcer
 	limiter *api.RateLimiter
+	webhook *api.WebhookHandler
 	cors    []string
 }
 
@@ -208,6 +215,9 @@ func newRouter(d routerDeps) http.Handler {
 	router.Get("/metrics", promhttp.Handler().ServeHTTP)
 	if d.authAPI != nil {
 		router.Post("/api/v1/auth/token", d.authAPI.Token)
+	}
+	if d.webhook != nil {
+		router.Post("/api/v1/webhooks/{id}/{endpoint}", d.webhook.Receive)
 	}
 	router.Group(func(r chi.Router) {
 		r.Use(d.auth.Middleware)
@@ -510,6 +520,20 @@ func checkNATS(ctx context.Context) bool {
 	defer nc.Close()
 	_ = ctx
 	return true
+}
+
+func newPublisher() (events.Publisher, func()) {
+	url := env("INTEGRATIONHUB_NATS_URL", "")
+	if url == "" {
+		slog.Warn("INTEGRATIONHUB_NATS_URL not set; execution events are only logged")
+		return events.Log{}, func() {}
+	}
+	pub, err := events.NewNATS(url)
+	if err != nil {
+		slog.Warn("nats unavailable; execution events are only logged", "error", err)
+		return events.Log{}, func() {}
+	}
+	return pub, pub.Close
 }
 
 func env(key, def string) string {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/RasimAghayev/integrationhub/internal/connauth"
 	"github.com/RasimAghayev/integrationhub/internal/domain"
+	"github.com/RasimAghayev/integrationhub/internal/events"
 	"github.com/RasimAghayev/integrationhub/internal/executor"
 	"github.com/RasimAghayev/integrationhub/internal/mapping"
 	"github.com/RasimAghayev/integrationhub/internal/secret"
@@ -48,11 +49,36 @@ type Service struct {
 	exec         *executor.Executor
 	cipher       *secret.Cipher
 	workers      int
+	publisher    events.Publisher
 }
 
 // New builds a Service. cipher may be nil when connections carry no secrets.
 func New(store ExecutionStore, integrations IntegrationStore, conns ConnectionStore, exec *executor.Executor, cipher *secret.Cipher) *Service {
 	return &Service{store: store, integrations: integrations, conns: conns, exec: exec, cipher: cipher, workers: 1}
+}
+
+// SetPublisher attaches an event publisher; nil disables publishing.
+func (s *Service) SetPublisher(p events.Publisher) {
+	s.publisher = p
+}
+
+func (s *Service) publish(ctx context.Context, e *domain.Execution, status domain.ExecutionStatus, statusCode, attempts int, errMsg string) {
+	if s.publisher == nil {
+		return
+	}
+	evt := events.Event{
+		Type:          string(status),
+		ExecutionID:   e.ID,
+		IntegrationID: e.IntegrationID,
+		Endpoint:      e.Endpoint,
+		Status:        string(status),
+		StatusCode:    statusCode,
+		Attempts:      attempts,
+		Error:         errMsg,
+	}
+	if err := s.publisher.Publish(ctx, evt); err != nil {
+		slog.Warn("failed to publish event", "execution_id", e.ID, "error", err)
+	}
 }
 
 // SetWorkers sets how many executions the background worker runs concurrently.
@@ -88,6 +114,7 @@ func (s *Service) Run(ctx context.Context, e *domain.Execution) (*domain.Executi
 	e.Status, e.StatusCode, e.ResponseBody, e.Attempts, e.Error = status, statusCode, body, attempts, errMsg
 	now := time.Now()
 	e.FinishedAt = &now
+	s.publish(ctx, e, status, statusCode, attempts, errMsg)
 	return e, nil
 }
 
