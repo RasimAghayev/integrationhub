@@ -14,6 +14,7 @@ import (
 	"github.com/RasimAghayev/integrationhub/internal/connauth"
 	"github.com/RasimAghayev/integrationhub/internal/domain"
 	"github.com/RasimAghayev/integrationhub/internal/executor"
+	"github.com/RasimAghayev/integrationhub/internal/mapping"
 	"github.com/RasimAghayev/integrationhub/internal/secret"
 )
 
@@ -211,6 +212,15 @@ func (s *Service) perform(ctx context.Context, e *domain.Execution) (domain.Exec
 	errMsg := ""
 	if err != nil {
 		errMsg = err.Error()
+	}
+	if status == domain.ExecutionSucceeded && res != nil && len(in.Mappings) > 0 {
+		mapped, mErr := mapping.ApplyResponse(res.Body, in.Mappings, in.Transform)
+		if mErr != nil {
+			status = domain.ExecutionFailed
+			errMsg = mErr.Error()
+		} else {
+			respBody = mapped
+		}
 	}
 	return status, statusCode, respBody, attempts, errMsg
 }

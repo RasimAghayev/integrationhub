@@ -235,6 +235,7 @@ func newRouter(d routerDeps) http.Handler {
 				if d.exec != nil {
 					r.Post("/{id}/execute", d.exec.Execute)
 				}
+				r.Post("/{id}/mapping/preview", d.int.PreviewMapping)
 			})
 		}
 		if d.exec != nil {

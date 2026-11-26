@@ -2,9 +2,11 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"github.com/RasimAghayev/integrationhub/internal/domain"
+	"github.com/RasimAghayev/integrationhub/internal/mapping"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -34,6 +36,8 @@ type integrationRequest struct {
 	Status       domain.IntegrationStatus `json:"status"`
 	ConnectionID string                   `json:"connection_id"`
 	Endpoints    []domain.Endpoint        `json:"endpoints"`
+	Mappings     []domain.FieldMapping    `json:"mappings"`
+	Transform    domain.TransformConfig   `json:"transform"`
 }
 
 func (h *IntegrationHandler) Create(w http.ResponseWriter, r *http.Request) {
@@ -49,8 +53,14 @@ func (h *IntegrationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		Status:       req.Status,
 		ConnectionID: req.ConnectionID,
 		Endpoints:    req.Endpoints,
+		Mappings:     req.Mappings,
+		Transform:    req.Transform,
 	}
 	if err := i.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := mapping.ValidateMappings(i.Mappings); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -109,7 +119,13 @@ func (h *IntegrationHandler) Update(w http.ResponseWriter, r *http.Request) {
 	existing.Status = req.Status
 	existing.ConnectionID = req.ConnectionID
 	existing.Endpoints = req.Endpoints
+	existing.Mappings = req.Mappings
+	existing.Transform = req.Transform
 	if err := existing.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := mapping.ValidateMappings(existing.Mappings); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -126,4 +142,36 @@ func (h *IntegrationHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type previewRequest struct {
+	Payload map[string]any `json:"payload"`
+}
+
+// PreviewMapping applies the stored mappings and transform to a sample payload.
+func (h *IntegrationHandler) PreviewMapping(w http.ResponseWriter, r *http.Request) {
+	i, err := h.store.Get(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeNotFound(w, err)
+		return
+	}
+	var req previewRequest
+	if status, msg := decodeJSON(w, r, &req); status != 0 {
+		writeError(w, status, msg)
+		return
+	}
+	if req.Payload == nil {
+		writeError(w, http.StatusBadRequest, "payload is required")
+		return
+	}
+	out, err := mapping.Apply(req.Payload, i.Mappings, i.Transform)
+	if err != nil {
+		status := http.StatusBadRequest
+		if !errors.Is(err, mapping.ErrMissingField) {
+			status = http.StatusUnprocessableEntity
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"output": out})
 }

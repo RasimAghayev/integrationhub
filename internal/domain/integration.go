@@ -46,6 +46,49 @@ type Endpoint struct {
 	BodyTemplate string `json:"body_template,omitempty"`
 }
 
+// validTransforms is the set of accepted per-field transform names.
+var validTransforms = map[string]bool{
+	"": true, "none": true, "upper": true, "lower": true, "trim": true,
+	"to_int": true, "to_string": true, "to_bool": true,
+}
+
+// ValidateTransform reports whether name is a supported per-field transform.
+func ValidateTransform(name string) bool {
+	if strings.HasPrefix(name, "default:") || strings.HasPrefix(name, "template:") {
+		return true
+	}
+	return validTransforms[name]
+}
+
+// FieldMapping copies one source field of an upstream response to a target
+// field of the normalized output, optionally applying a transform.
+type FieldMapping struct {
+	Source    string `json:"source"`
+	Target    string `json:"target"`
+	Transform string `json:"transform,omitempty"`
+	Required  bool   `json:"required,omitempty"`
+}
+
+// TransformType enumerates the supported response transform kinds.
+type TransformType string
+
+const (
+	TransformNone     TransformType = "none"
+	TransformTemplate TransformType = "template"
+)
+
+// ValidTransformTypes is the set of accepted transform kinds.
+var ValidTransformTypes = map[TransformType]bool{
+	TransformNone:     true,
+	TransformTemplate: true,
+}
+
+// TransformConfig post-processes the mapped payload.
+type TransformConfig struct {
+	Type     TransformType `json:"type"`
+	Template string        `json:"template,omitempty"`
+}
+
 // Integration is a configured connection to a 3rd-party API plus the endpoints
 // to call and the metadata needed to execute them.
 type Integration struct {
@@ -56,6 +99,8 @@ type Integration struct {
 	Status       IntegrationStatus `json:"status"`
 	ConnectionID string            `json:"connection_id"`
 	Endpoints    []Endpoint        `json:"endpoints"`
+	Mappings     []FieldMapping    `json:"mappings"`
+	Transform    TransformConfig   `json:"transform"`
 	CreatedAt    time.Time         `json:"created_at"`
 	UpdatedAt    time.Time         `json:"updated_at"`
 }
@@ -87,6 +132,23 @@ func (i *Integration) Validate() error {
 		if strings.TrimSpace(e.Path) == "" {
 			return &ValidationError{"endpoints[" + strconv.Itoa(idx) + "].path", "is required"}
 		}
+	}
+	for idx, m := range i.Mappings {
+		if strings.TrimSpace(m.Source) == "" {
+			return &ValidationError{"mappings[" + strconv.Itoa(idx) + "].source", "is required"}
+		}
+		if strings.TrimSpace(m.Target) == "" {
+			return &ValidationError{"mappings[" + strconv.Itoa(idx) + "].target", "is required"}
+		}
+		if !ValidateTransform(m.Transform) {
+			return &ValidationError{"mappings[" + strconv.Itoa(idx) + "].transform", "unsupported transform"}
+		}
+	}
+	if i.Transform.Type == "" {
+		i.Transform.Type = TransformNone
+	}
+	if !ValidTransformTypes[i.Transform.Type] {
+		return &ValidationError{"transform.type", "must be one of none, template"}
 	}
 	return nil
 }
