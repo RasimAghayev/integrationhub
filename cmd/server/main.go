@@ -2,19 +2,23 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/RasimAghayev/integrationhub/internal/api"
+	"github.com/RasimAghayev/integrationhub/internal/oauth"
 	"github.com/RasimAghayev/integrationhub/internal/secret"
 	"github.com/RasimAghayev/integrationhub/internal/store"
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
@@ -43,7 +47,7 @@ func main() {
 	initCtx, initCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer initCancel()
 
-	pool, err := pgxpool.New(initCtx, dbDSN())
+	pool, err := newPool(initCtx)
 	if err != nil {
 		slog.Error("postgres pool init failed", "error", err)
 		os.Exit(1)
@@ -56,17 +60,24 @@ func main() {
 	}
 
 	var cipher *secret.Cipher
+	var oauthMgr *oauth.Manager
 	if key := os.Getenv("INTEGRATIONHUB_SECRET_KEY"); key != "" {
-		cipher, err = secret.NewFromBase64(key)
+		keyBytes, err := base64.StdEncoding.DecodeString(key)
 		if err != nil {
 			slog.Error("invalid INTEGRATIONHUB_SECRET_KEY", "error", err)
 			os.Exit(1)
 		}
+		cipher, err = secret.New(keyBytes)
+		if err != nil {
+			slog.Error("invalid INTEGRATIONHUB_SECRET_KEY", "error", err)
+			os.Exit(1)
+		}
+		oauthMgr = oauth.NewManager(keyBytes)
 	} else {
 		slog.Warn("INTEGRATIONHUB_SECRET_KEY not set; credential encryption disabled")
 	}
 
-	connHandler := api.NewConnectionHandler(store.NewConnectionStore(pool), cipher)
+	connHandler := api.NewConnectionHandler(store.NewConnectionStore(pool), cipher, oauthMgr)
 	router := newRouter(routerDeps{conn: connHandler})
 
 	srv := &http.Server{
@@ -101,7 +112,10 @@ type routerDeps struct {
 
 func newRouter(d routerDeps) http.Handler {
 	router := chi.NewRouter()
+	router.Use(middleware.Recoverer)
+	router.Use(middleware.RequestID)
 	router.Use(metricsMiddleware)
+	router.Use(middleware.Timeout(30 * time.Second))
 	router.Get("/", handleRoot)
 	router.Get("/healthz", handleHealthz)
 	router.Get("/readyz", handleReadyz)
@@ -113,6 +127,10 @@ func newRouter(d routerDeps) http.Handler {
 			r.Get("/{id}", d.conn.Get)
 			r.Put("/{id}", d.conn.Update)
 			r.Delete("/{id}", d.conn.Delete)
+			r.Post("/{id}/test", d.conn.Test)
+			r.Get("/{id}/oauth/authorize", d.conn.OAuthAuthorize)
+			r.Get("/{id}/oauth/callback", d.conn.OAuthCallback)
+			r.Post("/{id}/oauth/refresh", d.conn.OAuthRefresh)
 		})
 	}
 	return router
@@ -180,6 +198,28 @@ func statusString(ok bool) string {
 		return "up"
 	}
 	return "degraded"
+}
+
+func newPool(ctx context.Context) (*pgxpool.Pool, error) {
+	cfg, err := pgxpool.ParseConfig(dbDSN())
+	if err != nil {
+		return nil, err
+	}
+	cfg.MaxConns = envInt32("INTEGRATIONHUB_DB_MAX_CONNS", 10)
+	cfg.MinConns = envInt32("INTEGRATIONHUB_DB_MIN_CONNS", 0)
+	cfg.MaxConnLifetime = time.Hour
+	cfg.MaxConnIdleTime = 30 * time.Minute
+	cfg.HealthCheckPeriod = time.Minute
+	return pgxpool.NewWithConfig(ctx, cfg)
+}
+
+func envInt32(key string, def int32) int32 {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return int32(n)
+		}
+	}
+	return def
 }
 
 func dbDSN() string {

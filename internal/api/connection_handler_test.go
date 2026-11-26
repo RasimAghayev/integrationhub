@@ -64,6 +64,10 @@ func testRouter(h *ConnectionHandler) http.Handler {
 		r.Get("/{id}", h.Get)
 		r.Put("/{id}", h.Update)
 		r.Delete("/{id}", h.Delete)
+		r.Post("/{id}/test", h.Test)
+		r.Get("/{id}/oauth/authorize", h.OAuthAuthorize)
+		r.Get("/{id}/oauth/callback", h.OAuthCallback)
+		r.Post("/{id}/oauth/refresh", h.OAuthRefresh)
 	})
 	return r
 }
@@ -146,5 +150,51 @@ func TestCreateRejectsCredentialsWithoutCipher(t *testing.T) {
 		`{"name":"X","type":"rest","auth_type":"api_key","credentials":{"key":"v"}}`)
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+}
+
+func TestConnectionTestEndpoint(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-API-Key") != "k-123" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	cipher, _ := secret.New(bytes.Repeat([]byte{0x09}, 32))
+	enc, _ := cipher.Encrypt([]byte(`{"api_key":"k-123"}`))
+	store := newFakeStore()
+	store.items["c1"] = &domain.Connection{
+		ID: "c1", Name: "X", Type: "rest", AuthType: domain.AuthAPIKey,
+		Config:    map[string]any{"base_url": upstream.URL, "health_path": "/health"},
+		SecretRef: enc,
+	}
+	h := NewConnectionHandler(store, cipher)
+
+	rec := do(t, testRouter(h), http.MethodPost, "/api/v1/connections/c1/test", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		OK         bool `json:"ok"`
+		StatusCode int  `json:"status_code"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !out.OK || out.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected result: %+v", out)
+	}
+}
+
+func TestConnectionTestMissingBaseURL(t *testing.T) {
+	store := newFakeStore()
+	store.items["c1"] = &domain.Connection{ID: "c1", Name: "X", Type: "rest", AuthType: domain.AuthNone}
+	h := NewConnectionHandler(store, nil)
+	rec := do(t, testRouter(h), http.MethodPost, "/api/v1/connections/c1/test", "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
 	}
 }
