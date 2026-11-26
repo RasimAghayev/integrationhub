@@ -11,8 +11,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/RasimAghayev/integrationhub/internal/api"
+	"github.com/RasimAghayev/integrationhub/internal/secret"
+	"github.com/RasimAghayev/integrationhub/internal/store"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -36,7 +40,34 @@ func main() {
 		addr = ":" + v
 	}
 
-	router := newRouter()
+	initCtx, initCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer initCancel()
+
+	pool, err := pgxpool.New(initCtx, dbDSN())
+	if err != nil {
+		slog.Error("postgres pool init failed", "error", err)
+		os.Exit(1)
+	}
+	defer pool.Close()
+
+	if err := store.Migrate(initCtx, pool); err != nil {
+		slog.Error("migrations failed", "error", err)
+		os.Exit(1)
+	}
+
+	var cipher *secret.Cipher
+	if key := os.Getenv("INTEGRATIONHUB_SECRET_KEY"); key != "" {
+		cipher, err = secret.NewFromBase64(key)
+		if err != nil {
+			slog.Error("invalid INTEGRATIONHUB_SECRET_KEY", "error", err)
+			os.Exit(1)
+		}
+	} else {
+		slog.Warn("INTEGRATIONHUB_SECRET_KEY not set; credential encryption disabled")
+	}
+
+	connHandler := api.NewConnectionHandler(store.NewConnectionStore(pool), cipher)
+	router := newRouter(routerDeps{conn: connHandler})
 
 	srv := &http.Server{
 		Addr:    addr,
@@ -64,13 +95,26 @@ func main() {
 	slog.Info("server stopped")
 }
 
-func newRouter() http.Handler {
+type routerDeps struct {
+	conn *api.ConnectionHandler
+}
+
+func newRouter(d routerDeps) http.Handler {
 	router := chi.NewRouter()
 	router.Use(metricsMiddleware)
 	router.Get("/", handleRoot)
 	router.Get("/healthz", handleHealthz)
 	router.Get("/readyz", handleReadyz)
 	router.Get("/metrics", promhttp.Handler().ServeHTTP)
+	if d.conn != nil {
+		router.Route("/api/v1/connections", func(r chi.Router) {
+			r.Get("/", d.conn.List)
+			r.Post("/", d.conn.Create)
+			r.Get("/{id}", d.conn.Get)
+			r.Put("/{id}", d.conn.Update)
+			r.Delete("/{id}", d.conn.Delete)
+		})
+	}
 	return router
 }
 
@@ -138,14 +182,17 @@ func statusString(ok bool) string {
 	return "degraded"
 }
 
-func checkPostgres(ctx context.Context) bool {
+func dbDSN() string {
 	host := env("INTEGRATIONHUB_DB_HOST", "localhost")
 	port := env("INTEGRATIONHUB_DB_PORT", "5432")
 	user := env("INTEGRATIONHUB_DB_USER", "integrationhub")
 	pass := env("INTEGRATIONHUB_DB_PASSWORD", "")
 	name := env("INTEGRATIONHUB_DB_NAME", "integrationhub")
-	dsn := "host=" + host + " port=" + port + " user=" + user + " password=" + pass + " dbname=" + name + " sslmode=disable connect_timeout=2"
-	_, err := pgx.Connect(ctx, dsn)
+	return "host=" + host + " port=" + port + " user=" + user + " password=" + pass + " dbname=" + name + " sslmode=disable connect_timeout=2"
+}
+
+func checkPostgres(ctx context.Context) bool {
+	_, err := pgx.Connect(ctx, dbDSN())
 	if err != nil {
 		slog.Error("postgres check failed", "error", err)
 		return false
