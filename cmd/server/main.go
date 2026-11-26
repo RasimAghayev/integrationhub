@@ -4,19 +4,29 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/RasimAghayev/integrationhub/internal/api"
+	"github.com/RasimAghayev/integrationhub/internal/auth"
+	"github.com/RasimAghayev/integrationhub/internal/domain"
+	"github.com/RasimAghayev/integrationhub/internal/events"
+	"github.com/RasimAghayev/integrationhub/internal/execution"
+	"github.com/RasimAghayev/integrationhub/internal/executor"
 	"github.com/RasimAghayev/integrationhub/internal/oauth"
+	"github.com/RasimAghayev/integrationhub/internal/rbac"
+	"github.com/RasimAghayev/integrationhub/internal/scheduler"
 	"github.com/RasimAghayev/integrationhub/internal/secret"
 	"github.com/RasimAghayev/integrationhub/internal/store"
+	"github.com/RasimAghayev/integrationhub/internal/telemetry"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5"
@@ -25,6 +35,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"golang.org/x/time/rate"
 )
 
 var httpRequests = prometheus.NewCounterVec(
@@ -47,12 +59,20 @@ func main() {
 	initCtx, initCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer initCancel()
 
+	shutdownTracing, err := telemetry.Init(initCtx, telemetry.FromEnv())
+	if err != nil {
+		slog.Error("tracing init failed", "error", err)
+		os.Exit(1)
+	}
+	defer telemetry.Shutdown(context.Background(), shutdownTracing)
+
 	pool, err := newPool(initCtx)
 	if err != nil {
 		slog.Error("postgres pool init failed", "error", err)
 		os.Exit(1)
 	}
 	defer pool.Close()
+	prometheus.MustRegister(newPoolStatsCollector(pool))
 
 	if err := store.Migrate(initCtx, pool); err != nil {
 		slog.Error("migrations failed", "error", err)
@@ -77,12 +97,85 @@ func main() {
 		slog.Warn("INTEGRATIONHUB_SECRET_KEY not set; credential encryption disabled")
 	}
 
-	connHandler := api.NewConnectionHandler(store.NewConnectionStore(pool), cipher, oauthMgr)
-	router := newRouter(routerDeps{conn: connHandler})
+	connStore := store.NewConnectionStore(pool)
+	connHandler := api.NewConnectionHandler(connStore, cipher, oauthMgr)
+
+	keyStore := store.NewAPIKeyStore(pool)
+	refreshStore := store.NewRefreshTokenStore(pool)
+	refreshMgr := auth.NewRefreshManager(refreshStore.AsAuthStore(),
+		envDuration("INTEGRATIONHUB_REFRESH_TTL", 30*24*time.Hour))
+	var authenticator *auth.Authenticator
+	var authHandler *api.AuthHandler
+	if jwtSecret := os.Getenv("INTEGRATIONHUB_JWT_SECRET"); jwtSecret != "" {
+		jwtMgr := auth.NewJWTManager([]byte(jwtSecret), envDuration("INTEGRATIONHUB_JWT_TTL", time.Hour), "integrationhub")
+		authenticator = auth.NewAuthenticator(jwtMgr, keyStore)
+		authHandler = api.NewAuthHandler(jwtMgr, keyStore, refreshMgr)
+	} else {
+		authenticator = auth.NewAuthenticator(nil, keyStore)
+		authHandler = api.NewAuthHandler(nil, keyStore, refreshMgr)
+		slog.Warn("INTEGRATIONHUB_JWT_SECRET not set; JWT authentication disabled")
+	}
+	if raw := os.Getenv("INTEGRATIONHUB_ADMIN_API_KEY"); raw != "" {
+		if err := seedAdminKey(initCtx, keyStore, raw); err != nil {
+			slog.Error("failed to seed admin api key", "error", err)
+			os.Exit(1)
+		}
+	}
+
+	enforcer, err := rbac.New(rbacPolicy())
+	if err != nil {
+		slog.Error("failed to build rbac enforcer", "error", err)
+		os.Exit(1)
+	}
+	execMetrics := executor.NewMetrics()
+	prometheus.MustRegister(execMetrics.Collectors()...)
+	exec := executor.New(executor.DefaultConfig(), nil)
+	exec.SetMetrics(execMetrics)
+	intStore := store.NewIntegrationStore(pool)
+	execSvc := execution.New(store.NewExecutionStore(pool), intStore, connStore, exec, cipher)
+	execSvc.SetWorkers(envInt("INTEGRATIONHUB_EXEC_WORKERS", 4))
+	publisher, closeEvents := newPublisher()
+	execSvc.SetPublisher(publisher)
+	workerCtx, workerCancel := context.WithCancel(context.Background())
+	defer workerCancel()
+	defer closeEvents()
+	execSvc.StartWorker(workerCtx, time.Duration(envInt("INTEGRATIONHUB_EXEC_POLL_MS", 1000))*time.Millisecond)
+	intHandler := api.NewIntegrationHandler(intStore)
+	execHandler := api.NewExecutionHandler(execSvc, intStore)
+	webhookHandler := api.NewWebhookHandler(execSvc, intStore, connStore)
+	schedStore := store.NewScheduleStore(pool)
+	schedHandler := api.NewScheduleHandler(schedStore)
+	sched := scheduler.New(schedStore, intStore, execSvc,
+		time.Duration(envInt("INTEGRATIONHUB_SCHED_TICK_MS", 60000))*time.Millisecond)
+	go sched.Start(workerCtx)
+	dataHandler := api.NewDataHandler(execSvc, intStore)
+	limiter := api.NewRateLimiter(
+		rate.Limit(envInt("INTEGRATIONHUB_RATE_PER_SEC", 100)),
+		envInt("INTEGRATIONHUB_RATE_BURST", 200),
+		5*time.Minute,
+	)
+	router := newRouter(routerDeps{
+		conn:     connHandler,
+		int:      intHandler,
+		exec:     execHandler,
+		auth:     authenticator,
+		authAPI:  authHandler,
+		rbac:     enforcer,
+		limiter:  limiter,
+		webhook:  webhookHandler,
+		schedule: schedHandler,
+		data:     dataHandler,
+		cors:     splitCSV(os.Getenv("INTEGRATIONHUB_CORS_ORIGINS")),
+	})
 
 	srv := &http.Server{
-		Addr:    addr,
-		Handler: router,
+		Addr:              addr,
+		Handler:           otelhttp.NewHandler(router, "http.server"),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 		BaseContext: func(net.Listener) context.Context {
 			return context.Background()
 		},
@@ -107,32 +200,95 @@ func main() {
 }
 
 type routerDeps struct {
-	conn *api.ConnectionHandler
+	conn     *api.ConnectionHandler
+	int      *api.IntegrationHandler
+	exec     *api.ExecutionHandler
+	auth     *auth.Authenticator
+	authAPI  *api.AuthHandler
+	rbac     *rbac.Enforcer
+	limiter  *api.RateLimiter
+	webhook  *api.WebhookHandler
+	schedule *api.ScheduleHandler
+	data     *api.DataHandler
+	cors     []string
 }
 
 func newRouter(d routerDeps) http.Handler {
 	router := chi.NewRouter()
-	router.Use(middleware.Recoverer)
 	router.Use(middleware.RequestID)
+	router.Use(api.RequestIDHeader)
+	router.Use(api.SecurityHeaders)
+	router.Use(d.limiter.Middleware)
+	router.Use(api.CORS(d.cors))
+	router.Use(slogRequestLogger)
+	router.Use(middleware.Recoverer)
 	router.Use(metricsMiddleware)
 	router.Use(middleware.Timeout(30 * time.Second))
 	router.Get("/", handleRoot)
 	router.Get("/healthz", handleHealthz)
 	router.Get("/readyz", handleReadyz)
 	router.Get("/metrics", promhttp.Handler().ServeHTTP)
-	if d.conn != nil {
-		router.Route("/api/v1/connections", func(r chi.Router) {
-			r.Get("/", d.conn.List)
-			r.Post("/", d.conn.Create)
-			r.Get("/{id}", d.conn.Get)
-			r.Put("/{id}", d.conn.Update)
-			r.Delete("/{id}", d.conn.Delete)
-			r.Post("/{id}/test", d.conn.Test)
-			r.Get("/{id}/oauth/authorize", d.conn.OAuthAuthorize)
-			r.Get("/{id}/oauth/callback", d.conn.OAuthCallback)
-			r.Post("/{id}/oauth/refresh", d.conn.OAuthRefresh)
-		})
+	if d.authAPI != nil {
+		router.Post("/api/v1/auth/token", d.authAPI.Token)
+		router.Post("/api/v1/auth/refresh", d.authAPI.Refresh)
 	}
+	if d.webhook != nil {
+		router.Post("/api/v1/webhooks/{id}/{endpoint}", d.webhook.Receive)
+	}
+	router.Group(func(r chi.Router) {
+		r.Use(d.auth.Middleware)
+		r.Use(d.rbac.Middleware(resourceFor))
+		if d.conn != nil {
+			r.Route("/api/v1/connections", func(r chi.Router) {
+				r.Get("/", d.conn.List)
+				r.Post("/", d.conn.Create)
+				r.Get("/{id}", d.conn.Get)
+				r.Put("/{id}", d.conn.Update)
+				r.Delete("/{id}", d.conn.Delete)
+				r.Post("/{id}/test", d.conn.Test)
+				r.Get("/{id}/oauth/authorize", d.conn.OAuthAuthorize)
+				r.Get("/{id}/oauth/callback", d.conn.OAuthCallback)
+				r.Post("/{id}/oauth/refresh", d.conn.OAuthRefresh)
+			})
+		}
+		if d.int != nil {
+			r.Route("/api/v1/integrations", func(r chi.Router) {
+				r.Get("/", d.int.List)
+				r.Post("/", d.int.Create)
+				r.Get("/{id}", d.int.Get)
+				r.Put("/{id}", d.int.Update)
+				r.Delete("/{id}", d.int.Delete)
+				if d.exec != nil {
+					r.Post("/{id}/execute", d.exec.Execute)
+				}
+				r.Post("/{id}/mapping/preview", d.int.PreviewMapping)
+			})
+		}
+		if d.schedule != nil {
+			r.Route("/api/v1/schedules", func(r chi.Router) {
+				r.Get("/", d.schedule.List)
+				r.Post("/", d.schedule.Create)
+				r.Get("/{id}", d.schedule.Get)
+				r.Put("/{id}", d.schedule.Update)
+				r.Delete("/{id}", d.schedule.Delete)
+			})
+		}
+		if d.data != nil {
+			r.Route("/api/v1/data", func(r chi.Router) {
+				r.Get("/export", d.data.Export)
+				r.Get("/schema/{id}", d.data.Schema)
+			})
+		}
+		if d.exec != nil {
+			r.Route("/api/v1/executions", func(r chi.Router) {
+				r.Get("/", d.exec.List)
+				r.Get("/counts", d.exec.Counts)
+				r.Get("/dead", d.exec.Dead)
+				r.Get("/{id}", d.exec.Get)
+				r.Post("/{id}/replay", d.exec.Replay)
+			})
+		}
+	})
 	return router
 }
 
@@ -140,10 +296,36 @@ func newSlogHandler() slog.Handler {
 	return slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})
 }
 
+func slogRequestLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+		start := time.Now()
+		defer func() {
+			slog.Info("http request",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"remote_addr", r.RemoteAddr,
+				"status", ww.Status(),
+				"bytes", ww.BytesWritten(),
+				"duration_ms", time.Since(start).Milliseconds(),
+				"request_id", middleware.GetReqID(r.Context()),
+			)
+		}()
+		next.ServeHTTP(ww, r)
+	})
+}
+
 func metricsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		next.ServeHTTP(w, r)
-		httpRequests.WithLabelValues(r.Method, r.URL.Path).Inc()
+		// Label by route pattern, not the concrete URL, to keep cardinality low.
+		pattern := "unmatched"
+		if rctx := chi.RouteContext(r.Context()); rctx != nil {
+			if p := rctx.RoutePattern(); p != "" {
+				pattern = p
+			}
+		}
+		httpRequests.WithLabelValues(r.Method, pattern).Inc()
 	})
 }
 
@@ -213,6 +395,37 @@ func newPool(ctx context.Context) (*pgxpool.Pool, error) {
 	return pgxpool.NewWithConfig(ctx, cfg)
 }
 
+// poolStatsCollector exports pgxpool statistics as Prometheus gauges so pool
+// saturation (AcquireDuration / empty acquires) is observable.
+type poolStatsCollector struct {
+	pool *pgxpool.Pool
+	desc *prometheus.Desc
+}
+
+func newPoolStatsCollector(pool *pgxpool.Pool) prometheus.Collector {
+	return &poolStatsCollector{
+		pool: pool,
+		desc: prometheus.NewDesc(
+			"integrationhub_pgxpool_stats",
+			"pgxpool connection statistics.",
+			[]string{"stat"}, nil,
+		),
+	}
+}
+
+func (c *poolStatsCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- c.desc
+}
+
+func (c *poolStatsCollector) Collect(ch chan<- prometheus.Metric) {
+	s := c.pool.Stat()
+	ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, float64(s.AcquiredConns()), "acquired")
+	ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, float64(s.IdleConns()), "idle")
+	ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, float64(s.TotalConns()), "total")
+	ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, float64(s.EmptyAcquireCount()), "empty_acquire_total")
+	ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, float64(s.CanceledAcquireCount()), "canceled_acquire_total")
+}
+
 func envInt32(key string, def int32) int32 {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
@@ -222,13 +435,84 @@ func envInt32(key string, def int32) int32 {
 	return def
 }
 
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
+func envDuration(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return def
+}
+
+// resourceFor maps a request path to the RBAC resource it touches.
+func resourceFor(r *http.Request) string {
+	p := r.URL.Path
+	switch {
+	case strings.HasPrefix(p, "/api/v1/connections"):
+		return "connections"
+	case strings.HasPrefix(p, "/api/v1/integrations"):
+		return "integrations"
+	case strings.HasPrefix(p, "/api/v1/executions"):
+		return "executions"
+	}
+	return ""
+}
+
+// rbacPolicy loads the policy from a file, an inline CSV, or the defaults.
+func rbacPolicy() string {
+	if path := os.Getenv("INTEGRATIONHUB_RBAC_POLICY_FILE"); path != "" {
+		if b, err := os.ReadFile(path); err == nil {
+			return string(b)
+		}
+		slog.Warn("INTEGRATIONHUB_RBAC_POLICY_FILE unreadable", "path", path)
+	}
+	if p := os.Getenv("INTEGRATIONHUB_RBAC_POLICY"); p != "" {
+		return p
+	}
+	return rbac.DefaultPolicy
+}
+
+// seedAdminKey creates the bootstrap admin API key when it does not exist yet.
+func seedAdminKey(ctx context.Context, s *store.APIKeyStore, raw string) error {
+	hash := auth.HashKey(raw)
+	if _, err := s.GetByHash(ctx, hash); err == nil {
+		return nil
+	} else if !errors.Is(err, domain.ErrNotFound) {
+		return err
+	}
+	return s.Create(ctx, &domain.APIKey{Subject: "admin", KeyHash: hash, Roles: []string{"admin"}})
+}
+
+func splitCSV(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 func dbDSN() string {
 	host := env("INTEGRATIONHUB_DB_HOST", "localhost")
 	port := env("INTEGRATIONHUB_DB_PORT", "5432")
 	user := env("INTEGRATIONHUB_DB_USER", "integrationhub")
 	pass := env("INTEGRATIONHUB_DB_PASSWORD", "")
 	name := env("INTEGRATIONHUB_DB_NAME", "integrationhub")
-	return "host=" + host + " port=" + port + " user=" + user + " password=" + pass + " dbname=" + name + " sslmode=disable connect_timeout=2"
+	return "host=" + host + " port=" + port + " user=" + user + " password=" + pass + " dbname=" + name + " sslmode=disable connect_timeout=2 statement_timeout=5000 idle_in_transaction_session_timeout=10000"
 }
 
 func checkPostgres(ctx context.Context) bool {
@@ -249,7 +533,7 @@ func checkRedis(ctx context.Context) bool {
 		ReadTimeout:  2 * time.Second,
 		WriteTimeout: 2 * time.Second,
 	})
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 	_, err := rdb.Ping(ctx).Result()
 	if err != nil {
 		slog.Error("redis check failed", "error", err)
@@ -267,6 +551,20 @@ func checkNATS(ctx context.Context) bool {
 	defer nc.Close()
 	_ = ctx
 	return true
+}
+
+func newPublisher() (events.Publisher, func()) {
+	url := env("INTEGRATIONHUB_NATS_URL", "")
+	if url == "" {
+		slog.Warn("INTEGRATIONHUB_NATS_URL not set; execution events are only logged")
+		return events.Log{}, func() {}
+	}
+	pub, err := events.NewNATS(url)
+	if err != nil {
+		slog.Warn("nats unavailable; execution events are only logged", "error", err)
+		return events.Log{}, func() {}
+	}
+	return pub, pub.Close
 }
 
 func env(key, def string) string {

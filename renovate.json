@@ -1,0 +1,51 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":semanticCommits",
+    ":separateMajorReleases",
+    ":dependencyDashboard",
+    "group:monorepos",
+    "group:recommended"
+  ],
+  "baseBranches": ["preview"],
+  "timezone": "Europe/Baku",
+  "schedule": ["before 6am on monday"],
+  "prConcurrentLimit": 5,
+  "prCreation": "immediate",
+  "labels": ["dependencies"],
+  "vulnerabilityAlerts": {
+    "labels": ["security"],
+    "automerge": true
+  },
+  "osvVulnerabilityAlerts": true,
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 6am on the 1st day of the month"]
+  },
+  "packageRules": [
+    {
+      "description": "Group Go minor/patch updates",
+      "matchManagers": ["gomod"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "go modules (minor/patch)"
+    },
+    {
+      "description": "Group npm dev tooling",
+      "matchManagers": ["npm"],
+      "matchDepTypes": ["devDependencies"],
+      "groupName": "web dev tooling"
+    },
+    {
+      "description": "Pin GitHub Actions to their current major",
+      "matchManagers": ["github-actions"],
+      "rangeStrategy": "pin"
+    },
+    {
+      "description": "Docker base images: review major bumps manually",
+      "matchManagers": ["dockerfile"],
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true
+    }
+  ]
+}

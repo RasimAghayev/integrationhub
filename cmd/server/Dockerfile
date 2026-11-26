@@ -1,18 +1,17 @@
-FROM golang:1.22-alpine AS builder
-WORKDIR /app
-RUN apk add --no-cache git ca-certificates tzdata
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/server ./cmd/server
+# syntax=docker/dockerfile:1.7
 
-FROM alpine:3.20
-RUN apk add --no-cache ca-certificates tzdata && \
-    addgroup -g 1000 app && \
-    adduser -D -u 1000 -G app app
+FROM golang:1.26 AS builder
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
+COPY . .
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /bin/server ./cmd/server
+
+FROM gcr.io/distroless/static-debian12:nonroot
 WORKDIR /app
 COPY --from=builder /bin/server /bin/server
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-USER app
 EXPOSE 8080
+USER nonroot:nonroot
 ENTRYPOINT ["/bin/server"]

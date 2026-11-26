@@ -1,0 +1,177 @@
+package api
+
+import (
+	"context"
+	"errors"
+	"net/http"
+
+	"github.com/RasimAghayev/integrationhub/internal/domain"
+	"github.com/RasimAghayev/integrationhub/internal/mapping"
+	"github.com/go-chi/chi/v5"
+)
+
+// IntegrationStore is the persistence contract used by IntegrationHandler.
+type IntegrationStore interface {
+	Create(ctx context.Context, i *domain.Integration) error
+	Get(ctx context.Context, id string) (*domain.Integration, error)
+	List(ctx context.Context) ([]*domain.Integration, error)
+	Update(ctx context.Context, i *domain.Integration) error
+	Delete(ctx context.Context, id string) error
+}
+
+// IntegrationHandler serves integration CRUD endpoints.
+type IntegrationHandler struct {
+	store IntegrationStore
+}
+
+// NewIntegrationHandler builds an IntegrationHandler.
+func NewIntegrationHandler(store IntegrationStore) *IntegrationHandler {
+	return &IntegrationHandler{store: store}
+}
+
+type integrationRequest struct {
+	Name         string                   `json:"name"`
+	Description  string                   `json:"description"`
+	Type         domain.IntegrationType   `json:"type"`
+	Status       domain.IntegrationStatus `json:"status"`
+	ConnectionID string                   `json:"connection_id"`
+	Endpoints    []domain.Endpoint        `json:"endpoints"`
+	Mappings     []domain.FieldMapping    `json:"mappings"`
+	Transform    domain.TransformConfig   `json:"transform"`
+}
+
+func (h *IntegrationHandler) Create(w http.ResponseWriter, r *http.Request) {
+	var req integrationRequest
+	if status, msg := decodeJSON(w, r, &req); status != 0 {
+		writeError(w, status, msg)
+		return
+	}
+	i := &domain.Integration{
+		Name:         req.Name,
+		Description:  req.Description,
+		Type:         req.Type,
+		Status:       req.Status,
+		ConnectionID: req.ConnectionID,
+		Endpoints:    req.Endpoints,
+		Mappings:     req.Mappings,
+		Transform:    req.Transform,
+	}
+	if err := i.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := mapping.ValidateMappings(i.Mappings); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := h.store.Create(r.Context(), i); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create integration")
+		return
+	}
+	writeJSON(w, http.StatusCreated, i)
+}
+
+func (h *IntegrationHandler) List(w http.ResponseWriter, r *http.Request) {
+	items, err := h.store.List(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list integrations")
+		return
+	}
+	total := len(items)
+	if limit, offset, ok := parsePagination(r); ok {
+		if offset > total {
+			offset = total
+		}
+		end := offset + limit
+		if end > total {
+			end = total
+		}
+		writeJSON(w, http.StatusOK, page{Items: items[offset:end], Limit: limit, Offset: offset, Total: total})
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (h *IntegrationHandler) Get(w http.ResponseWriter, r *http.Request) {
+	i, err := h.store.Get(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeNotFound(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, i)
+}
+
+func (h *IntegrationHandler) Update(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	existing, err := h.store.Get(r.Context(), id)
+	if err != nil {
+		writeNotFound(w, err)
+		return
+	}
+	var req integrationRequest
+	if status, msg := decodeJSON(w, r, &req); status != 0 {
+		writeError(w, status, msg)
+		return
+	}
+	existing.Name = req.Name
+	existing.Description = req.Description
+	existing.Type = req.Type
+	existing.Status = req.Status
+	existing.ConnectionID = req.ConnectionID
+	existing.Endpoints = req.Endpoints
+	existing.Mappings = req.Mappings
+	existing.Transform = req.Transform
+	if err := existing.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := mapping.ValidateMappings(existing.Mappings); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := h.store.Update(r.Context(), existing); err != nil {
+		writeNotFound(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, existing)
+}
+
+func (h *IntegrationHandler) Delete(w http.ResponseWriter, r *http.Request) {
+	if err := h.store.Delete(r.Context(), chi.URLParam(r, "id")); err != nil {
+		writeNotFound(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type previewRequest struct {
+	Payload map[string]any `json:"payload"`
+}
+
+// PreviewMapping applies the stored mappings and transform to a sample payload.
+func (h *IntegrationHandler) PreviewMapping(w http.ResponseWriter, r *http.Request) {
+	i, err := h.store.Get(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeNotFound(w, err)
+		return
+	}
+	var req previewRequest
+	if status, msg := decodeJSON(w, r, &req); status != 0 {
+		writeError(w, status, msg)
+		return
+	}
+	if req.Payload == nil {
+		writeError(w, http.StatusBadRequest, "payload is required")
+		return
+	}
+	out, err := mapping.Apply(req.Payload, i.Mappings, i.Transform)
+	if err != nil {
+		status := http.StatusBadRequest
+		if !errors.Is(err, mapping.ErrMissingField) {
+			status = http.StatusUnprocessableEntity
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"output": out})
+}
