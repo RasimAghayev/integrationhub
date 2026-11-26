@@ -9,9 +9,16 @@ import {
   type Schedule,
 } from "./api";
 
-type Tab = "connections" | "integrations" | "executions" | "schedules";
+type Tab = "dashboard" | "connections" | "integrations" | "mapper" | "executions" | "schedules";
 
-const TABS: Tab[] = ["connections", "integrations", "executions", "schedules"];
+const TABS: Tab[] = [
+  "dashboard",
+  "connections",
+  "integrations",
+  "mapper",
+  "executions",
+  "schedules",
+];
 
 export function App() {
   const [tab, setTab] = useState<Tab>("integrations");
@@ -22,6 +29,10 @@ export function App() {
   const [integrations, setIntegrations] = useState<Integration[]>([]);
   const [executions, setExecutions] = useState<Execution[]>([]);
   const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const [counts, setCounts] = useState<Record<string, number>>({});
+  const [mapperId, setMapperId] = useState("");
+  const [mapperPayload, setMapperPayload] = useState('{"data":{"id":"7","name":"  Acme  "}}');
+  const [mapperOutput, setMapperOutput] = useState("");
   const [scheduleForm, setScheduleForm] = useState({
     name: "",
     integration_id: "",
@@ -32,16 +43,18 @@ export function App() {
   const load = useCallback(async () => {
     setError("");
     try {
-      const [conns, ints, execs, scheds] = await Promise.all([
+      const [conns, ints, execs, scheds, cnts] = await Promise.all([
         api.connections(),
         api.integrations(),
         api.executions(),
         api.schedules(),
+        api.counts(),
       ]);
       setConnections(conns);
       setIntegrations(ints);
       setExecutions(execs);
       setSchedules(scheds);
+      setCounts(cnts);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -71,6 +84,28 @@ export function App() {
     try {
       await api.execute(integration.id, endpoint);
       await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function runMapper() {
+    setError("");
+    setMapperOutput("");
+    if (!mapperId) {
+      setError("select an integration first");
+      return;
+    }
+    let payload: unknown;
+    try {
+      payload = JSON.parse(mapperPayload);
+    } catch {
+      setError("payload is not valid JSON");
+      return;
+    }
+    try {
+      const res = await api.previewMapping(mapperId, payload);
+      setMapperOutput(JSON.stringify(res.output, null, 2));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -142,6 +177,67 @@ export function App() {
       </nav>
 
       {error && <p className="error">{error}</p>}
+
+      {tab === "dashboard" && (
+        <ul className="cards stats">
+          {(
+            [
+              ["total", "executions"],
+              ["succeeded", "succeeded"],
+              ["failed", "failed"],
+              ["dead", "dead letter"],
+              ["queued", "queued"],
+              ["running", "running"],
+            ] as const
+          ).map(([key, label]) => (
+            <li key={key}>
+              <strong>{counts[key] ?? 0}</strong>
+              <span>{label}</span>
+            </li>
+          ))}
+          <li>
+            <strong>{integrations.length}</strong>
+            <span>integrations</span>
+          </li>
+          <li>
+            <strong>{connections.length}</strong>
+            <span>connections</span>
+          </li>
+          <li>
+            <strong>{schedules.filter((s) => s.enabled).length}</strong>
+            <span>active schedules</span>
+          </li>
+        </ul>
+      )}
+
+      {tab === "mapper" && (
+        <>
+          <div className="row">
+            <select
+              aria-label="Integration"
+              value={mapperId}
+              onChange={(e) => setMapperId(e.target.value)}
+            >
+              <option value="">select integration</option>
+              {integrations.map((i) => (
+                <option key={i.id} value={i.id}>
+                  {i.name}
+                </option>
+              ))}
+            </select>
+            <button onClick={() => void runMapper()}>Preview</button>
+          </div>
+          <div className="split">
+            <textarea
+              aria-label="Sample payload"
+              value={mapperPayload}
+              onChange={(e) => setMapperPayload(e.target.value)}
+              rows={14}
+            />
+            <pre className="output">{mapperOutput || "mapped output appears here"}</pre>
+          </div>
+        </>
+      )}
 
       {tab === "connections" && (
         <ul className="cards">

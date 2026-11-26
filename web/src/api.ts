@@ -69,6 +69,12 @@ export const api = {
     request<Execution[]>(
       `/api/v1/executions${integrationId ? `?integration_id=${integrationId}` : ""}`,
     ),
+  counts: () => request<Record<string, number>>("/api/v1/executions/counts"),
+  previewMapping: (id: string, payload: unknown) =>
+    request<{ output: Record<string, unknown> }>(
+      `/api/v1/integrations/${id}/mapping/preview`,
+      { method: "POST", body: JSON.stringify({ payload }) },
+    ),
   schedules: () => request<Schedule[]>("/api/v1/schedules"),
   createSchedule: (body: Omit<Schedule, "id" | "next_run">) =>
     request<Schedule>("/api/v1/schedules", { method: "POST", body: JSON.stringify(body) }),
