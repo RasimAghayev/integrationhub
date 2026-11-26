@@ -8,6 +8,7 @@
     "group:monorepos",
     "group:recommended"
   ],
+  "baseBranches": ["preview"],
   "timezone": "Europe/Baku",
   "schedule": ["before 6am on monday"],
   "prConcurrentLimit": 5,

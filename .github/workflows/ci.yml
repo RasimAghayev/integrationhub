@@ -2,9 +2,8 @@ name: CI
 
 on:
   push:
-    branches: [preview, test, main]
+    branches: [preview, test, main, "feat/**", "chore/**", "fix/**"]
   pull_request:
-    branches: [preview, test, main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
