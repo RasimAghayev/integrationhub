@@ -23,6 +23,7 @@ import (
 	"github.com/RasimAghayev/integrationhub/internal/executor"
 	"github.com/RasimAghayev/integrationhub/internal/oauth"
 	"github.com/RasimAghayev/integrationhub/internal/rbac"
+	"github.com/RasimAghayev/integrationhub/internal/scheduler"
 	"github.com/RasimAghayev/integrationhub/internal/secret"
 	"github.com/RasimAghayev/integrationhub/internal/store"
 	"github.com/RasimAghayev/integrationhub/internal/telemetry"
@@ -138,21 +139,27 @@ func main() {
 	intHandler := api.NewIntegrationHandler(intStore)
 	execHandler := api.NewExecutionHandler(execSvc, intStore)
 	webhookHandler := api.NewWebhookHandler(execSvc, intStore, connStore)
+	schedStore := store.NewScheduleStore(pool)
+	schedHandler := api.NewScheduleHandler(schedStore)
+	sched := scheduler.New(schedStore, intStore, execSvc,
+		time.Duration(envInt("INTEGRATIONHUB_SCHED_TICK_MS", 60000))*time.Millisecond)
+	go sched.Start(workerCtx)
 	limiter := api.NewRateLimiter(
 		rate.Limit(envInt("INTEGRATIONHUB_RATE_PER_SEC", 100)),
 		envInt("INTEGRATIONHUB_RATE_BURST", 200),
 		5*time.Minute,
 	)
 	router := newRouter(routerDeps{
-		conn:    connHandler,
-		int:     intHandler,
-		exec:    execHandler,
-		auth:    authenticator,
-		authAPI: authHandler,
-		rbac:    enforcer,
-		limiter: limiter,
-		webhook: webhookHandler,
-		cors:    splitCSV(os.Getenv("INTEGRATIONHUB_CORS_ORIGINS")),
+		conn:     connHandler,
+		int:      intHandler,
+		exec:     execHandler,
+		auth:     authenticator,
+		authAPI:  authHandler,
+		rbac:     enforcer,
+		limiter:  limiter,
+		webhook:  webhookHandler,
+		schedule: schedHandler,
+		cors:     splitCSV(os.Getenv("INTEGRATIONHUB_CORS_ORIGINS")),
 	})
 
 	srv := &http.Server{
@@ -187,15 +194,16 @@ func main() {
 }
 
 type routerDeps struct {
-	conn    *api.ConnectionHandler
-	int     *api.IntegrationHandler
-	exec    *api.ExecutionHandler
-	auth    *auth.Authenticator
-	authAPI *api.AuthHandler
-	rbac    *rbac.Enforcer
-	limiter *api.RateLimiter
-	webhook *api.WebhookHandler
-	cors    []string
+	conn     *api.ConnectionHandler
+	int      *api.IntegrationHandler
+	exec     *api.ExecutionHandler
+	auth     *auth.Authenticator
+	authAPI  *api.AuthHandler
+	rbac     *rbac.Enforcer
+	limiter  *api.RateLimiter
+	webhook  *api.WebhookHandler
+	schedule *api.ScheduleHandler
+	cors     []string
 }
 
 func newRouter(d routerDeps) http.Handler {
@@ -246,6 +254,15 @@ func newRouter(d routerDeps) http.Handler {
 					r.Post("/{id}/execute", d.exec.Execute)
 				}
 				r.Post("/{id}/mapping/preview", d.int.PreviewMapping)
+			})
+		}
+		if d.schedule != nil {
+			r.Route("/api/v1/schedules", func(r chi.Router) {
+				r.Get("/", d.schedule.List)
+				r.Post("/", d.schedule.Create)
+				r.Get("/{id}", d.schedule.Get)
+				r.Put("/{id}", d.schedule.Update)
+				r.Delete("/{id}", d.schedule.Delete)
 			})
 		}
 		if d.exec != nil {
