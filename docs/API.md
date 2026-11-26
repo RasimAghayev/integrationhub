@@ -1,8 +1,8 @@
 # API Reference (v1)
 
 Base URL: `http://localhost:8080`
-All `/api/v1` routes except `POST /api/v1/auth/token` and the webhook receiver
-require `Authorization: Bearer <jwt>` or `X-API-Key: <key>`.
+All `/api/v1` routes except `POST /api/v1/auth/token`, `POST /api/v1/auth/refresh`
+and the webhook receiver require `Authorization: Bearer <jwt>` or `X-API-Key: <key>`.
 
 ## Authentication
 
@@ -12,7 +12,16 @@ Exchange an admin API key for a short-lived JWT.
 ```json
 { "grant_type": "api_key" }
 ```
-Headers: `X-API-Key: <admin key>` → `200 { "token": "...", "expires_in": 3600 }`
+Headers: `X-API-Key: <admin key>` → `200 { "access_token": "...", "refresh_token": "...", "expires_in": 3600 }`
+
+### POST /api/v1/auth/refresh
+Rotate a refresh token and mint a new access token.
+
+```json
+{ "refresh_token": "..." }
+```
+→ `200 { "access_token": "...", "refresh_token": "...", "expires_in": 3600 }`.
+Reusing a rotated token revokes the whole token family (`401`).
 
 ## Connections
 
