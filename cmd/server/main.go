@@ -111,10 +111,12 @@ func checkPostgres(ctx context.Context) bool {
 	host := env("INTEGRATIONHUB_DB_HOST", "localhost")
 	port := env("INTEGRATIONHUB_DB_PORT", "5432")
 	user := env("INTEGRATIONHUB_DB_USER", "integrationhub")
+	pass := env("INTEGRATIONHUB_DB_PASSWORD", "")
 	name := env("INTEGRATIONHUB_DB_NAME", "integrationhub")
-	dsn := "host=" + host + " port=" + port + " user=" + user + " dbname=" + name + " sslmode=disable connect_timeout=2s"
+	dsn := "host=" + host + " port=" + port + " user=" + user + " password=" + pass + " dbname=" + name + " sslmode=disable connect_timeout=2"
 	_, err := pgx.Connect(ctx, dsn)
 	if err != nil {
+		log.Printf("postgres check error: %v", err)
 		return false
 	}
 	return true
@@ -124,12 +126,16 @@ func checkRedis(ctx context.Context) bool {
 	addr := env("INTEGRATIONHUB_REDIS_ADDR", "localhost:6379")
 	rdb := redis.NewClient(&redis.Options{
 		Addr:         addr,
+		Password:     env("INTEGRATIONHUB_REDIS_PASSWORD", ""),
 		DialTimeout:  2 * time.Second,
 		ReadTimeout:  2 * time.Second,
 		WriteTimeout: 2 * time.Second,
 	})
 	defer rdb.Close()
 	_, err := rdb.Ping(ctx).Result()
+	if err != nil {
+		log.Printf("redis check error: %v", err)
+	}
 	return err == nil
 }
 
