@@ -54,8 +54,8 @@ type connectionRequest struct {
 
 func (h *ConnectionHandler) Create(w http.ResponseWriter, r *http.Request) {
 	var req connectionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+	if status, msg := decodeJSON(w, r, &req); status != 0 {
+		writeError(w, status, msg)
 		return
 	}
 	c := &domain.Connection{
@@ -93,6 +93,18 @@ func (h *ConnectionHandler) List(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to list connections")
 		return
 	}
+	total := len(items)
+	if limit, offset, ok := parsePagination(r); ok {
+		if offset > total {
+			offset = total
+		}
+		end := offset + limit
+		if end > total {
+			end = total
+		}
+		writeJSON(w, http.StatusOK, page{Items: items[offset:end], Limit: limit, Offset: offset, Total: total})
+		return
+	}
 	writeJSON(w, http.StatusOK, items)
 }
 
@@ -113,8 +125,8 @@ func (h *ConnectionHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req connectionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+	if status, msg := decodeJSON(w, r, &req); status != 0 {
+		writeError(w, status, msg)
 		return
 	}
 	existing.Name = req.Name
@@ -309,7 +321,7 @@ func (h *ConnectionHandler) Test(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() {
 		_, _ = io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":          resp.StatusCode < 400,

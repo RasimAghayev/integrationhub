@@ -10,10 +10,12 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/RasimAghayev/integrationhub/internal/api"
+	"github.com/RasimAghayev/integrationhub/internal/executor"
 	"github.com/RasimAghayev/integrationhub/internal/oauth"
 	"github.com/RasimAghayev/integrationhub/internal/secret"
 	"github.com/RasimAghayev/integrationhub/internal/store"
@@ -25,6 +27,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
+	"golang.org/x/time/rate"
 )
 
 var httpRequests = prometheus.NewCounterVec(
@@ -53,6 +56,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer pool.Close()
+	prometheus.MustRegister(newPoolStatsCollector(pool))
 
 	if err := store.Migrate(initCtx, pool); err != nil {
 		slog.Error("migrations failed", "error", err)
@@ -77,13 +81,34 @@ func main() {
 		slog.Warn("INTEGRATIONHUB_SECRET_KEY not set; credential encryption disabled")
 	}
 
-	connHandler := api.NewConnectionHandler(store.NewConnectionStore(pool), cipher, oauthMgr)
-	intHandler := api.NewIntegrationHandler(store.NewIntegrationStore(pool))
-	router := newRouter(routerDeps{conn: connHandler, int: intHandler})
+	connStore := store.NewConnectionStore(pool)
+	connHandler := api.NewConnectionHandler(connStore, cipher, oauthMgr)
+	execMetrics := executor.NewMetrics()
+	prometheus.MustRegister(execMetrics.Collectors()...)
+	exec := executor.New(executor.DefaultConfig(), nil)
+	exec.SetMetrics(execMetrics)
+	intHandler := api.NewIntegrationHandler(store.NewIntegrationStore(pool)).
+		WithExecutor(exec, connStore)
+	limiter := api.NewRateLimiter(
+		rate.Limit(envInt("INTEGRATIONHUB_RATE_PER_SEC", 100)),
+		envInt("INTEGRATIONHUB_RATE_BURST", 200),
+		5*time.Minute,
+	)
+	router := newRouter(routerDeps{
+		conn:    connHandler,
+		int:     intHandler,
+		limiter: limiter,
+		cors:    splitCSV(os.Getenv("INTEGRATIONHUB_CORS_ORIGINS")),
+	})
 
 	srv := &http.Server{
-		Addr:    addr,
-		Handler: router,
+		Addr:              addr,
+		Handler:           router,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 		BaseContext: func(net.Listener) context.Context {
 			return context.Background()
 		},
@@ -108,14 +133,21 @@ func main() {
 }
 
 type routerDeps struct {
-	conn *api.ConnectionHandler
-	int  *api.IntegrationHandler
+	conn    *api.ConnectionHandler
+	int     *api.IntegrationHandler
+	limiter *api.RateLimiter
+	cors    []string
 }
 
 func newRouter(d routerDeps) http.Handler {
 	router := chi.NewRouter()
-	router.Use(middleware.Recoverer)
 	router.Use(middleware.RequestID)
+	router.Use(api.RequestIDHeader)
+	router.Use(api.SecurityHeaders)
+	router.Use(d.limiter.Middleware)
+	router.Use(api.CORS(d.cors))
+	router.Use(slogRequestLogger)
+	router.Use(middleware.Recoverer)
 	router.Use(metricsMiddleware)
 	router.Use(middleware.Timeout(30 * time.Second))
 	router.Get("/", handleRoot)
@@ -142,6 +174,7 @@ func newRouter(d routerDeps) http.Handler {
 			r.Get("/{id}", d.int.Get)
 			r.Put("/{id}", d.int.Update)
 			r.Delete("/{id}", d.int.Delete)
+			r.Post("/{id}/execute", d.int.Execute)
 		})
 	}
 	return router
@@ -151,10 +184,36 @@ func newSlogHandler() slog.Handler {
 	return slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})
 }
 
+func slogRequestLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+		start := time.Now()
+		defer func() {
+			slog.Info("http request",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"remote_addr", r.RemoteAddr,
+				"status", ww.Status(),
+				"bytes", ww.BytesWritten(),
+				"duration_ms", time.Since(start).Milliseconds(),
+				"request_id", middleware.GetReqID(r.Context()),
+			)
+		}()
+		next.ServeHTTP(ww, r)
+	})
+}
+
 func metricsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		next.ServeHTTP(w, r)
-		httpRequests.WithLabelValues(r.Method, r.URL.Path).Inc()
+		// Label by route pattern, not the concrete URL, to keep cardinality low.
+		pattern := "unmatched"
+		if rctx := chi.RouteContext(r.Context()); rctx != nil {
+			if p := rctx.RoutePattern(); p != "" {
+				pattern = p
+			}
+		}
+		httpRequests.WithLabelValues(r.Method, pattern).Inc()
 	})
 }
 
@@ -224,6 +283,37 @@ func newPool(ctx context.Context) (*pgxpool.Pool, error) {
 	return pgxpool.NewWithConfig(ctx, cfg)
 }
 
+// poolStatsCollector exports pgxpool statistics as Prometheus gauges so pool
+// saturation (AcquireDuration / empty acquires) is observable.
+type poolStatsCollector struct {
+	pool *pgxpool.Pool
+	desc *prometheus.Desc
+}
+
+func newPoolStatsCollector(pool *pgxpool.Pool) prometheus.Collector {
+	return &poolStatsCollector{
+		pool: pool,
+		desc: prometheus.NewDesc(
+			"integrationhub_pgxpool_stats",
+			"pgxpool connection statistics.",
+			[]string{"stat"}, nil,
+		),
+	}
+}
+
+func (c *poolStatsCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- c.desc
+}
+
+func (c *poolStatsCollector) Collect(ch chan<- prometheus.Metric) {
+	s := c.pool.Stat()
+	ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, float64(s.AcquiredConns()), "acquired")
+	ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, float64(s.IdleConns()), "idle")
+	ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, float64(s.TotalConns()), "total")
+	ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, float64(s.EmptyAcquireCount()), "empty_acquire_total")
+	ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, float64(s.CanceledAcquireCount()), "canceled_acquire_total")
+}
+
 func envInt32(key string, def int32) int32 {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
@@ -233,13 +323,36 @@ func envInt32(key string, def int32) int32 {
 	return def
 }
 
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
+func splitCSV(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 func dbDSN() string {
 	host := env("INTEGRATIONHUB_DB_HOST", "localhost")
 	port := env("INTEGRATIONHUB_DB_PORT", "5432")
 	user := env("INTEGRATIONHUB_DB_USER", "integrationhub")
 	pass := env("INTEGRATIONHUB_DB_PASSWORD", "")
 	name := env("INTEGRATIONHUB_DB_NAME", "integrationhub")
-	return "host=" + host + " port=" + port + " user=" + user + " password=" + pass + " dbname=" + name + " sslmode=disable connect_timeout=2"
+	return "host=" + host + " port=" + port + " user=" + user + " password=" + pass + " dbname=" + name + " sslmode=disable connect_timeout=2 statement_timeout=5000 idle_in_transaction_session_timeout=10000"
 }
 
 func checkPostgres(ctx context.Context) bool {
@@ -260,7 +373,7 @@ func checkRedis(ctx context.Context) bool {
 		ReadTimeout:  2 * time.Second,
 		WriteTimeout: 2 * time.Second,
 	})
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 	_, err := rdb.Ping(ctx).Result()
 	if err != nil {
 		slog.Error("redis check failed", "error", err)
