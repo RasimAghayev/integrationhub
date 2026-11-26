@@ -107,27 +107,6 @@ jobs:
           push: ${{ github.ref == 'refs/heads/main' }}
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}/server:${{ github.sha }}
 
-  security:
-    name: Security Scans
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    needs: build
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-
-      - name: Resolve lowercase image name
-        run: echo "IMAGE_NAME_LC=${IMAGE_NAME,,}" >> "$GITHUB_ENV"
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Run gosec
-        run: go run github.com/securego/gosec/v2/cmd/gosec@latest ./... || true
-
       - name: Run Trivy container scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -137,7 +116,24 @@ jobs:
           ignore-unfixed: true
           severity: CRITICAL,HIGH
           vuln-type: os,library
-          skip-dirs: /node_modules
+
+   security:
+    name: Security Scans
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: build
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run gosec
+        run: go run github.com/securego/gosec/v2/cmd/gosec@latest ./... || true
 
   sbom:
     name: SBOM

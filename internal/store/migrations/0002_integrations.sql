@@ -4,7 +4,7 @@ CREATE TABLE IF NOT EXISTS integrations (
     description   TEXT NOT NULL DEFAULT '',
     type          TEXT NOT NULL,
     status        TEXT NOT NULL DEFAULT 'active',
-    connection_id UUID NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
+    connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
     endpoints     JSONB NOT NULL DEFAULT '[]'::jsonb,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
