@@ -101,14 +101,18 @@ func main() {
 	connHandler := api.NewConnectionHandler(connStore, cipher, oauthMgr)
 
 	keyStore := store.NewAPIKeyStore(pool)
+	refreshStore := store.NewRefreshTokenStore(pool)
+	refreshMgr := auth.NewRefreshManager(refreshStore.AsAuthStore(),
+		envDuration("INTEGRATIONHUB_REFRESH_TTL", 30*24*time.Hour))
 	var authenticator *auth.Authenticator
 	var authHandler *api.AuthHandler
 	if jwtSecret := os.Getenv("INTEGRATIONHUB_JWT_SECRET"); jwtSecret != "" {
 		jwtMgr := auth.NewJWTManager([]byte(jwtSecret), envDuration("INTEGRATIONHUB_JWT_TTL", time.Hour), "integrationhub")
 		authenticator = auth.NewAuthenticator(jwtMgr, keyStore)
-		authHandler = api.NewAuthHandler(jwtMgr, keyStore)
+		authHandler = api.NewAuthHandler(jwtMgr, keyStore, refreshMgr)
 	} else {
 		authenticator = auth.NewAuthenticator(nil, keyStore)
+		authHandler = api.NewAuthHandler(nil, keyStore, refreshMgr)
 		slog.Warn("INTEGRATIONHUB_JWT_SECRET not set; JWT authentication disabled")
 	}
 	if raw := os.Getenv("INTEGRATIONHUB_ADMIN_API_KEY"); raw != "" {
@@ -226,6 +230,7 @@ func newRouter(d routerDeps) http.Handler {
 	router.Get("/metrics", promhttp.Handler().ServeHTTP)
 	if d.authAPI != nil {
 		router.Post("/api/v1/auth/token", d.authAPI.Token)
+		router.Post("/api/v1/auth/refresh", d.authAPI.Refresh)
 	}
 	if d.webhook != nil {
 		router.Post("/api/v1/webhooks/{id}/{endpoint}", d.webhook.Receive)
