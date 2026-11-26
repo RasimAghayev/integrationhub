@@ -75,18 +75,21 @@ type TransformType string
 const (
 	TransformNone     TransformType = "none"
 	TransformTemplate TransformType = "template"
+	TransformLua      TransformType = "lua"
 )
 
 // ValidTransformTypes is the set of accepted transform kinds.
 var ValidTransformTypes = map[TransformType]bool{
 	TransformNone:     true,
 	TransformTemplate: true,
+	TransformLua:      true,
 }
 
 // TransformConfig post-processes the mapped payload.
 type TransformConfig struct {
 	Type     TransformType `json:"type"`
 	Template string        `json:"template,omitempty"`
+	Script   string        `json:"script,omitempty"`
 }
 
 // Integration is a configured connection to a 3rd-party API plus the endpoints
@@ -148,7 +151,13 @@ func (i *Integration) Validate() error {
 		i.Transform.Type = TransformNone
 	}
 	if !ValidTransformTypes[i.Transform.Type] {
-		return &ValidationError{"transform.type", "must be one of none, template"}
+		return &ValidationError{"transform.type", "must be one of none, template, lua"}
+	}
+	if i.Transform.Type == TransformTemplate && strings.TrimSpace(i.Transform.Template) == "" {
+		return &ValidationError{"transform.template", "is required for template transforms"}
+	}
+	if i.Transform.Type == TransformLua && strings.TrimSpace(i.Transform.Script) == "" {
+		return &ValidationError{"transform.script", "is required for lua transforms"}
 	}
 	return nil
 }

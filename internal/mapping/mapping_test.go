@@ -119,6 +119,19 @@ func TestApplyResponse(t *testing.T) {
 	}
 }
 
+func TestApplyLuaTransform(t *testing.T) {
+	out, err := Apply(sample(), []domain.FieldMapping{{Source: "data.id", Target: "id"}}, domain.TransformConfig{
+		Type:   domain.TransformLua,
+		Script: `out = { doubled = payload.id * 2 }`,
+	})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if out["doubled"] != float64(84) {
+		t.Fatalf("doubled = %#v", out["doubled"])
+	}
+}
+
 func TestValidateMappings(t *testing.T) {
 	if err := ValidateMappings([]domain.FieldMapping{{Source: "a", Target: "b"}}); err != nil {
 		t.Fatalf("valid mappings rejected: %v", err)

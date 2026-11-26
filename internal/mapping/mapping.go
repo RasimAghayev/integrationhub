@@ -10,6 +10,7 @@ import (
 	"text/template"
 
 	"github.com/RasimAghayev/integrationhub/internal/domain"
+	"github.com/RasimAghayev/integrationhub/internal/transform"
 )
 
 // ErrMissingField is returned when a required source field is absent.
@@ -65,6 +66,8 @@ func applyConfig(out map[string]any, cfg domain.TransformConfig) (map[string]any
 			return nil, fmt.Errorf("mapping: transform template must render a JSON object: %w", err)
 		}
 		return res, nil
+	case domain.TransformLua:
+		return transform.Apply(cfg.Script, out)
 	default:
 		return nil, fmt.Errorf("mapping: unsupported transform type %q", cfg.Type)
 	}
