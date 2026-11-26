@@ -101,6 +101,7 @@ jobs:
         with:
           context: .
           file: ./cmd/server/Dockerfile
+          load: true
           push: ${{ github.ref == 'refs/heads/main' }}
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/server:${{ github.sha }}
 
@@ -125,8 +126,31 @@ jobs:
       - name: Run Trivy container scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/server:${{ github.sha }}
-          skip-dirs: /node_modules
-          skip-files: go.sum
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/server:${{ github.sha }}
           format: table
           exit-code: 1
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+          vuln-type: os,library
+          skip-dirs: /node_modules
+
+  sbom:
+    name: SBOM
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: test
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Generate SBOM (CycloneDX)
+        uses: anchore/sbom-action@v0.21.0
+        with:
+          path: .
+          format: cyclonedx-json
+          artifact-name: sbom-${{ github.sha }}
+          upload-artifact: true
+          upload-artifact-retention: 30
