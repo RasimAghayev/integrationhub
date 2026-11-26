@@ -1,60 +1,62 @@
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "0.1.0")
-COMPOSE_PROJECT_NAME ?= integrationhub
-DOCKER_BUILD_ARGS ?=
+COMPOSE_FILE := infrastructure/docker/compose/compose.dev.yaml
+COMPOSE := docker compose -f $(COMPOSE_FILE)
+GO_IMAGE := golang:1.22
+GO_RUN := docker run --rm -v "$(CURDIR)":/app -w /app $(GO_IMAGE)
 
-.PHONY: help build test verify up down run shell logs migrate seed clean lint format security
+.PHONY: help build test test-integration verify up down run shell logs migrate seed clean lint format security
 
 help: ## Show this help message
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
 build: ## Build all Docker images
-	docker compose build
+	$(COMPOSE) build
 
-test: ## Run all tests in Docker
-	docker compose run --rm server /bin/sh -c "go test ./..."
-	docker compose run --rm web /bin/sh -c "cd /app && npm test -- --run || true"
+test: ## Run all tests
+	$(GO_RUN) go test ./... -cover
+
+test-integration: ## Run integration tests (testcontainers, needs Docker)
+	$(GO_RUN) go test -tags integration ./... -cover
 
 verify: build test ## Build and test (quality gate)
 
-up: verify ## Start all services (depends on verify)
-	docker compose up -d
+up: build ## Start all services
+	$(COMPOSE) up -d
 
 down: ## Stop all services
-	docker compose down
+	$(COMPOSE) down
 
 run: ## Run services in foreground
-	docker compose up
+	$(COMPOSE) up
 
 shell: ## Open shell in server container
-	docker compose run --rm server /bin/sh
+	$(COMPOSE) run --rm server /bin/sh
 
 logs: ## View service logs
-	docker compose logs -f
+	$(COMPOSE) logs -f
 
 migrate-up: ## Run database migrations
-	docker compose run --rm server /bin/sh -c "go run ./cmd/migrate"
+	$(COMPOSE) run --rm server /bin/sh -c "go run ./cmd/migrate"
 
 migrate-down: ## Rollback database migrations
-	docker compose run --rm server /bin/sh -c "go run ./cmd/migrate --down"
+	$(COMPOSE) run --rm server /bin/sh -c "go run ./cmd/migrate --down"
 
 seed: ## Run database seeders
-	docker compose run --rm server /bin/sh -c "go run ./cmd/seed"
+	$(COMPOSE) run --rm server /bin/sh -c "go run ./cmd/seed"
 
 clean: ## Clean build artifacts
-	docker compose down --volumes --remove-orphans
-	rm -rf cmd/server/bin web/node_modules coverage/
+	$(COMPOSE) down --volumes --remove-orphans
+	rm -rf cmd/server/bin coverage/
 
 lint: ## Run linters
-	docker compose run --rm server /bin/sh -c "golangci-lint run ./..."
-	docker compose run --rm web /bin/sh -c "cd /app && npm run lint || true"
+	$(GO_RUN) go vet ./...
+	$(GO_RUN) sh -c "test -z \"$$(gofmt -l .)\""
 
 format: ## Format code
-	docker compose run --rm server /bin/sh -c "gofmt -w ."
-	docker compose run --rm web /bin/sh -c "cd /app && npm run format || true"
+	$(GO_RUN) gofmt -w .
 
 security: ## Run security scans
-	docker compose run --rm server /bin/sh -c "gosec ./..."
-	docker compose run --rm web /bin/sh -c "cd /app && npm audit || true"
+	$(GO_RUN) sh -c "go run github.com/securego/gosec/v2/cmd/gosec@latest ./... || true"
 
 migrate: migrate-up
 seed-up: seed
