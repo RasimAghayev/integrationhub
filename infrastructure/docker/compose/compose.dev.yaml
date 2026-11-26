@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   postgres:
     image: postgres:16-alpine
@@ -7,9 +5,7 @@ services:
     environment:
       POSTGRES_DB: integrationhub
       POSTGRES_USER: integrationhub
-      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
-    secrets:
-      - db_password
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devpassword}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
@@ -27,17 +23,14 @@ services:
     container_name: integrationhub-mongodb
     environment:
       MONGO_INITDB_DATABASE: integrationhub
-      MONGO_INITDB_ROOT_USERNAME_FILE: /run/secrets/mongo_root_user
-      MONGO_INITDB_ROOT_PASSWORD_FILE: /run/secrets/mongo_root_password
-    secrets:
-      - mongo_root_user
-      - mongo_root_password
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-root}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-devpassword}
     volumes:
       - mongodb_data:/data/db
     ports:
       - "27017:27017"
     healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.runCommand({ ping: 1 })"]
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -47,13 +40,13 @@ services:
   redis:
     image: redis:7-alpine
     container_name: integrationhub-redis
-    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-}"]
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-devpassword}"]
     ports:
       - "6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD:-devpassword}\" ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -68,7 +61,7 @@ services:
       - "4222:4222"
       - "8222:8222"
     healthcheck:
-      test: ["CMD", "nats", "ping", "-s", "nats://localhost:4222"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8222/healthz"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -77,25 +70,19 @@ services:
 
   server:
     build:
-      context: ./cmd/server
-      dockerfile: Dockerfile
+      context: ../../..
+      dockerfile: cmd/server/Dockerfile
     container_name: integrationhub-server
     environment:
       INTEGRATIONHUB_DB_HOST: postgres
-      INTEGRATIONHUB_DB_PORT: 5432
+      INTEGRATIONHUB_DB_PORT: "5432"
       INTEGRATIONHUB_DB_USER: integrationhub
-      INTEGRATIONHUB_DB_PASSWORD_FILE: /run/secrets/db_password
+      INTEGRATIONHUB_DB_PASSWORD: ${POSTGRES_PASSWORD:-devpassword}
       INTEGRATIONHUB_DB_NAME: integrationhub
-      INTEGRATIONHUB_MONGO_HOST: mongodb
-      INTEGRATIONHUB_MONGO_PORT: 27017
       INTEGRATIONHUB_REDIS_ADDR: redis:6379
-      INTEGRATIONHUB_REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      INTEGRATIONHUB_REDIS_PASSWORD: ${REDIS_PASSWORD:-devpassword}
       INTEGRATIONHUB_NATS_URL: nats://nats:4222
-      INTEGRATIONHUB_JWT_SECRET_FILE: /run/secrets/jwt_secret
-    secrets:
-      - db_password
-      - redis_password
-      - jwt_secret
+      INTEGRATIONHUB_JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-change-me}
     ports:
       - "8080:8080"
     depends_on:
@@ -119,7 +106,7 @@ services:
     image: nginx:alpine
     container_name: integrationhub-nginx
     volumes:
-      - ./infrastructure/docker/nginx:/etc/nginx/conf.d:ro
+      - ../../nginx:/etc/nginx/conf.d:ro
     ports:
       - "80:80"
     depends_on:
@@ -135,15 +122,3 @@ volumes:
 networks:
   integrationhub:
     driver: bridge
-
-secrets:
-  db_password:
-    file: ./secrets/db_password
-  mongo_root_user:
-    file: ./secrets/mongo_root_user
-  mongo_root_password:
-    file: ./secrets/mongo_root_password
-  redis_password:
-    file: ./secrets/redis_password
-  jwt_secret:
-    file: ./secrets/jwt_secret

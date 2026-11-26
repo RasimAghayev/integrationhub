@@ -13,8 +13,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
-	"github.com/redis/go-redis/v9"
 	"github.com/nats-io/nats.go"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -31,7 +31,7 @@ func main() {
 	router.Get("/readyz", handleReadyz)
 
 	srv := &http.Server{
-		Addr: addr,
+		Addr:    addr,
 		Handler: router,
 		BaseContext: func(net.Listener) context.Context {
 			return context.Background()
@@ -57,8 +57,8 @@ func main() {
 func handleRoot(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{
-		"service":  "integrationhub",
-		"version":  "0.1.0",
+		"service": "integrationhub",
+		"version": "0.1.0",
 	})
 }
 
@@ -111,10 +111,12 @@ func checkPostgres(ctx context.Context) bool {
 	host := env("INTEGRATIONHUB_DB_HOST", "localhost")
 	port := env("INTEGRATIONHUB_DB_PORT", "5432")
 	user := env("INTEGRATIONHUB_DB_USER", "integrationhub")
+	pass := env("INTEGRATIONHUB_DB_PASSWORD", "")
 	name := env("INTEGRATIONHUB_DB_NAME", "integrationhub")
-	dsn := "host=" + host + " port=" + port + " user=" + user + " dbname=" + name + " sslmode=disable connect_timeout=2s"
+	dsn := "host=" + host + " port=" + port + " user=" + user + " password=" + pass + " dbname=" + name + " sslmode=disable connect_timeout=2"
 	_, err := pgx.Connect(ctx, dsn)
 	if err != nil {
+		log.Printf("postgres check error: %v", err)
 		return false
 	}
 	return true
@@ -124,18 +126,22 @@ func checkRedis(ctx context.Context) bool {
 	addr := env("INTEGRATIONHUB_REDIS_ADDR", "localhost:6379")
 	rdb := redis.NewClient(&redis.Options{
 		Addr:         addr,
+		Password:     env("INTEGRATIONHUB_REDIS_PASSWORD", ""),
 		DialTimeout:  2 * time.Second,
 		ReadTimeout:  2 * time.Second,
 		WriteTimeout: 2 * time.Second,
 	})
 	defer rdb.Close()
 	_, err := rdb.Ping(ctx).Result()
+	if err != nil {
+		log.Printf("redis check error: %v", err)
+	}
 	return err == nil
 }
 
 func checkNATS(ctx context.Context) bool {
 	url := env("INTEGRATIONHUB_NATS_URL", "nats://localhost:4222")
-	nc, err := nats.Connect(url, nats.ConnectTimeout(2*time.Second))
+	nc, err := nats.Connect(url, nats.Timeout(2*time.Second))
 	if err != nil {
 		return false
 	}

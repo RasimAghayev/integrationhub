@@ -5,6 +5,7 @@
 /*.so
 /*.dylib
 /bin/
+/server
 /vendor/
 test-*.out
 
