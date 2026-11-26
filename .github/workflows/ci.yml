@@ -117,7 +117,7 @@ jobs:
           severity: CRITICAL,HIGH
           vuln-type: os,library
 
-   security:
+  security:
     name: Security Scans
     runs-on: ubuntu-latest
     timeout-minutes: 15
